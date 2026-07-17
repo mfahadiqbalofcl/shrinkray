@@ -143,10 +143,14 @@ function settingsParams() {
   return p;
 }
 
+const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per chunk
+const UPLOAD_CONCURRENCY = 4; // chunks in flight at once
+const CHUNK_RETRIES = 4;
+
 /**
  * XHR POST with a real upload-progress callback plus an incremental NDJSON
- * response reader. fetch() cannot report upload progress — which is exactly what
- * a 400 MB / 1 GB upload needs — so we use XHR here.
+ * response reader. fetch() cannot report upload progress, so loose-image
+ * uploads use this. (Large ZIPs use the chunked uploader below instead.)
  */
 function streamPost(url, body, onUpload, onEvent, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -168,23 +172,94 @@ function streamPost(url, body, onUpload, onEvent, headers = {}) {
     };
     xhr.onprogress = drain;
     xhr.onload = () => { drain(); (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(safeErr(xhr) || `Server error ${xhr.status}`)); };
-    xhr.onerror = () => reject(new Error('Network error — is the server running?'));
+    xhr.onerror = () => reject(new Error('Network error. Is the server running?'));
     xhr.send(body);
   });
 }
 
 function safeErr(xhr) { try { return JSON.parse(xhr.responseText).error; } catch { return null; } }
 
-/** Any ZIP: raw-body upload (streamed to disk server-side) + staged UI. */
+/** PUT one chunk, with retries. Resolves once the server has stored it. */
+function putChunk(id, offset, blob) {
+  return new Promise((resolve, reject) => {
+    let attempt = 0;
+    const send = () => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', `/api/upload/chunk/${id}?offset=${offset}`);
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else if (++attempt < CHUNK_RETRIES) setTimeout(send, 250 * attempt);
+        else reject(new Error(safeErr(xhr) || `Chunk failed (${xhr.status})`));
+      };
+      xhr.onerror = () => { if (++attempt < CHUNK_RETRIES) setTimeout(send, 250 * attempt); else reject(new Error('Chunk upload failed')); };
+      xhr.send(blob);
+    };
+    send();
+  });
+}
+
+/**
+ * Upload a file in parallel chunks. A dropped chunk is retried on its own
+ * instead of restarting the whole upload, and `onProgress(loaded, total)` fires
+ * as chunks land. Returns the server upload id once every chunk is stored.
+ */
+async function chunkedUpload(file, onProgress) {
+  const initRes = await fetch('/api/upload/init', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filename: file.name, size: file.size }),
+  });
+  if (!initRes.ok) throw new Error((await initRes.json().catch(() => ({}))).error || 'Could not start upload');
+  const { id } = await initRes.json();
+
+  // Build the list of chunk offsets, then run them through a small worker pool.
+  const offsets = [];
+  for (let o = 0; o < file.size; o += CHUNK_SIZE) offsets.push(o);
+  let uploaded = 0;
+  let next = 0;
+  const worker = async () => {
+    while (next < offsets.length) {
+      const offset = offsets[next++];
+      const blob = file.slice(offset, Math.min(offset + CHUNK_SIZE, file.size));
+      await putChunk(id, offset, blob);
+      uploaded += blob.size;
+      onProgress(uploaded, file.size);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(UPLOAD_CONCURRENCY, offsets.length) }, worker));
+  return id;
+}
+
+/** Read an NDJSON response stream (no upload body) via fetch. */
+async function fetchStream(url, onEvent) {
+  const res = await fetch(url, { method: 'POST' });
+  if (!res.ok || !res.body) throw new Error((await res.json().catch(() => ({}))).error || `Server error ${res.status}`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onEvent(JSON.parse(line));
+    }
+  }
+}
+
+/** Any ZIP: chunked resumable upload, then process, with staged UI. */
 async function runZip(zip) {
   const b = beginBatch({ zip: true, title: zip.name });
-  await streamPost(
-    `/api/compress-zip?${settingsParams().toString()}`,
-    zip,
-    (l, t) => b.onUpload(l, t),
-    (ev) => b.onEvent(ev),
-    { 'Content-Type': 'application/zip' }
-  ).catch((err) => b.fail(err.message));
+  try {
+    const id = await chunkedUpload(zip, (loaded, total) => b.onUpload(loaded, total));
+    b.onUpload(-1, -1); // upload done
+    await fetchStream(`/api/upload/process/${id}?${settingsParams().toString()}`, (ev) => b.onEvent(ev));
+  } catch (err) {
+    b.fail(err.message);
+  }
 }
 
 /** Loose images: multipart upload + per-image result cards. */
@@ -195,6 +270,25 @@ async function runLoose(images) {
   const originals = new Map(images.map((f) => [f.name, f]));
   const b = beginBatch({ zip: false, title: `${images.length} image${images.length > 1 ? 's' : ''}`, showPanel: images.length > 1, originals });
   await streamPost('/api/compress', fd, (l, t) => b.onUpload(l, t), (ev) => b.onEvent(ev)).catch((err) => b.fail(err.message));
+}
+
+/**
+ * Trigger a browser download that streams to disk (works for any file size).
+ * Checks the result is still available first (a HEAD request) so an expired
+ * result shows a clear message instead of downloading an error page.
+ */
+async function triggerDownload(url, filename) {
+  try {
+    const head = await fetch(url, { method: 'HEAD' });
+    if (!head.ok) return false;
+  } catch { return false; }
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename || '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +308,7 @@ function beginBatch({ zip, title, showPanel = true, originals }) {
     $('#batchEta').textContent = '';
     $('#batchBar').style.width = '0%';
     indeterminate(false);
-    const dl = $('#batchDownload'); dl.classList.add('hidden'); dl.removeAttribute('href');
+    const dl = $('#batchDownload'); dl.classList.add('hidden'); dl.onclick = null;
     for (const s of STEP_ORDER) { setStep(s, ''); setStepNote(s, ''); }
     stepEl('read').style.display = zip ? '' : 'none';
     stepEl('package').style.display = zip ? '' : 'none';
@@ -312,11 +406,20 @@ function finishBatch(ev, st) {
     `${fmtSize(s.totalIn)} → <span class="big">${fmtSize(s.totalOut)}</span> · ${s.percentSaved ?? 0}% smaller` +
     (s.failed ? ` · ${s.failed} failed` : '') + (s.skipped ? ` · ${s.skipped} skipped` : '');
   $('#batchEta').textContent = '';
+
   const dl = $('#batchDownload');
   if (ev.downloadId) {
-    dl.href = `/api/download/${ev.downloadId}`;
+    const url = `/api/download/${ev.downloadId}`;
+    const filename = st.zip ? 'shrinkray-compressed.zip' : 'shrinkray-images.zip';
     dl.textContent = st.zip ? '↓ Download ZIP' : '↓ Download all as ZIP';
     dl.classList.remove('hidden');
+    dl.onclick = async () => {
+      const ok = await triggerDownload(url, filename);
+      if (!ok) { $('#batchFoot').textContent = 'That result expired. Please compress again.'; dl.classList.add('hidden'); }
+    };
+    // Auto-start the download so the file is saved without hunting for a button.
+    // (The button stays as a fallback if the browser blocks the automatic one.)
+    triggerDownload(url, filename);
   }
 }
 

@@ -4,6 +4,24 @@ Notable changes to ShrinkRay. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/). Versions are milestones, not
 npm releases.
 
+## [1.3.0] - Resumable uploads and reliable downloads
+
+Makes the upload and download robust enough to trust with big files.
+
+### Added
+
+- Chunked, resumable uploads. A ZIP is uploaded as 8 MB chunks, up to four in flight at once, and a dropped chunk is retried on its own instead of restarting the whole upload. Progress reflects real bytes stored on the server.
+- The download now starts automatically the moment the ZIP is ready, with the Download button kept as a fallback in case the browser blocks the automatic one.
+- HTTP Range support on downloads, so the browser shows real download progress and can resume an interrupted download.
+
+### Fixed
+
+- After compressing, the Download button could do nothing if the result was no longer available. The server now returns `410 Gone` for an expired result and the UI says "This download expired. Please compress again." instead of failing silently.
+
+### Changed
+
+- New endpoints for the upload flow: `POST /api/upload/init`, `PUT /api/upload/chunk/:id`, `GET /api/upload/status/:id`, `POST /api/upload/process/:id`. The old raw-body `POST /api/compress-zip` stays as a fallback.
+
 ## [1.2.0] - Large uploads and staged progress
 
 Handles archives from a few hundred MB up to several GB, and shows what's

@@ -101,10 +101,10 @@ In the web UI, a dropped ZIP shows a staged progress panel (Uploading, Reading, 
 
 Large ZIPs are handled without ever holding the archive in memory:
 
-- the upload streams straight to a temp file on disk as it arrives, and the browser shows a real upload-progress bar via `XHR.upload` (a 400 MB upload should never look frozen);
-- the archive is read one image at a time ([yauzl](https://www.npmjs.com/package/yauzl)), each is compressed on the worker pool, and the result is streamed into the output ZIP on disk ([yazl](https://www.npmjs.com/package/yazl));
+- the ZIP is uploaded in 8 MB chunks, a few at a time, so a dropped chunk is retried on its own instead of restarting the whole upload, and the progress bar tracks real bytes stored;
+- each chunk streams straight to a temp file on disk, and the archive is read one image at a time ([yauzl](https://www.npmjs.com/package/yauzl)), compressed on the worker pool, and streamed into the output ZIP on disk ([yazl](https://www.npmjs.com/package/yazl));
 - peak memory is bounded by `workers × one decoded image`, not by the size of the archive, so a 400 MB ZIP and a 4 GB ZIP use about the same RAM;
-- the finished ZIP is streamed back from disk on download.
+- when the result is ready the download starts on its own, with a Download button as a fallback. Downloads support HTTP Range, so the browser shows progress and can resume.
 
 A 1 GB folder of photos compresses fine on an ordinary laptop. It will take a few minutes, but that's the encoder doing the work, not the plumbing, which is why the progress panel shows a per-image count and an ETA. Set `SHRINKRAY_WORKERS=N` to tune the pool size for your machine's RAM and cores.
 

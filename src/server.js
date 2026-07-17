@@ -27,6 +27,7 @@ import { parseMultipart } from './multipart.js';
 import { compressMany } from './batch.js';
 import { readZip, writeZip, rewriteExtension } from './zip.js';
 import { processZipFile } from './largezip.js';
+import { createUpload, writeChunk, uploadStatus, finalizeUpload } from './uploads.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
@@ -282,54 +283,82 @@ function zipReport(manifest, skipped) {
   return lines.join('\n') + '\n';
 }
 
+/**
+ * Serve a packaged result for download, with HTTP Range support so the browser
+ * shows real download progress and can resume an interrupted download. Works
+ * for both in-memory buffers (loose "download all") and disk-backed ZIPs.
+ */
 async function handleDownload(req, res, id) {
   const item = downloads.get(id);
-  if (!item) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Download expired or not found'); }
-  const headers = {
+  if (!item) {
+    // 410 Gone tells the client this id is dead so it can show a clear message
+    // ("the result expired, please compress again") instead of a silent fail.
+    res.writeHead(410, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'This download expired. Please compress again.' }));
+  }
+
+  let totalSize;
+  if (item.buffer) totalSize = item.buffer.length;
+  else {
+    const st = await stat(item.path).catch(() => null);
+    if (!st) {
+      res.writeHead(410, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ error: 'This download is no longer available. Please compress again.' }));
+    }
+    totalSize = st.size;
+  }
+
+  const baseHeaders = {
     'content-type': 'application/zip',
     'content-disposition': `attachment; filename="${item.filename}"`,
+    'accept-ranges': 'bytes',
+    'cache-control': 'no-store',
   };
-  if (item.buffer) {
-    headers['content-length'] = item.buffer.length;
-    res.writeHead(200, headers);
-    return res.end(item.buffer);
+
+  // Parse a single "bytes=start-end" range if present.
+  const range = parseRange(req.headers.range, totalSize);
+  if (range) {
+    const { start, end } = range;
+    res.writeHead(206, { ...baseHeaders, 'content-range': `bytes ${start}-${end}/${totalSize}`, 'content-length': end - start + 1 });
+    if (req.method === 'HEAD') return res.end();
+    if (item.buffer) return res.end(item.buffer.subarray(start, end + 1));
+    return createReadStream(item.path, { start, end }).pipe(res);
   }
-  // Disk-backed result (large ZIP): stream it, never load it into memory.
-  const st = await stat(item.path).catch(() => null);
-  if (!st) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Download no longer available'); }
-  headers['content-length'] = st.size;
-  res.writeHead(200, headers);
+
+  res.writeHead(200, { ...baseHeaders, 'content-length': totalSize });
+  if (req.method === 'HEAD') return res.end();
+  if (item.buffer) return res.end(item.buffer);
   createReadStream(item.path).pipe(res);
 }
 
+/** Parse one HTTP Range header ("bytes=start-end"). Returns null if absent/invalid. */
+function parseRange(header, size) {
+  if (!header) return null;
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!m) return null;
+  let start = m[1] === '' ? null : Number(m[1]);
+  let end = m[2] === '' ? null : Number(m[2]);
+  if (start === null && end === null) return null;
+  if (start === null) { start = Math.max(0, size - end); end = size - 1; } // suffix range
+  else if (end === null || end >= size) end = size - 1;
+  if (start > end || start < 0) return null;
+  return { start, end };
+}
+
 /**
- * Large ZIP upload: the raw request body is a .zip, streamed straight to a temp
- * file (never buffered in memory), then processed entry-by-entry to a result
- * ZIP on disk. Progress is streamed back as NDJSON with named stages. This is
- * the path that handles 431 MB / 1 GB+ archives.
+ * Process an assembled ZIP file (on disk, in `dir`) entry-by-entry to a result
+ * ZIP, streaming staged NDJSON progress. Shared by the chunked-upload flow and
+ * the raw-body fallback. Cleans up the input on success and the whole dir on
+ * failure; the output ZIP is kept for download.
  */
-async function handleCompressZip(req, res, opts) {
-  const dir = await mkdtemp(join(tmpdir(), 'shrinkray-'));
-  const inPath = join(dir, 'in.zip');
-  const outPath = join(dir, 'out.zip');
-
-  // Phase 1: receive the upload, streaming to disk. (The browser shows upload
-  // progress from its own XHR.upload events during this.)
-  try {
-    await pipeline(req, createWriteStream(inPath));
-  } catch (err) {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
-    if (!res.headersSent) sendJson(res, 400, { error: `Upload failed: ${err.message}` });
-    return;
-  }
-
-  // Phase 2: process, streaming staged progress.
+async function processZipAndStream(res, inPath, dir, opts) {
   res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-cache' });
   const send = (obj) => res.write(JSON.stringify(obj) + '\n');
+  const outPath = join(dir, 'out.zip');
   try {
     const uploadedSize = (await stat(inPath)).size;
     send({ type: 'uploaded', size: uploadedSize });
-    const { stats } = await processZipFile(inPath, outPath, opts, (ev) => {
+    const { stats, outSize } = await processZipFile(inPath, outPath, opts, (ev) => {
       if (ev.stage === 'reading') send({ type: 'stage', stage: 'reading' });
       else if (ev.stage === 'start') send({ type: 'start', total: ev.total, skipped: ev.skipped, isZip: true });
       else if (ev.stage === 'compressing') send({ type: 'progress', done: ev.done, total: ev.total, totalIn: ev.totalIn, totalOut: ev.totalOut, name: ev.name });
@@ -337,12 +366,62 @@ async function handleCompressZip(req, res, opts) {
     });
     await rm(inPath, { force: true }).catch(() => {}); // input no longer needed
     const downloadId = stashDownload({ path: outPath, dir, filename: 'shrinkray-compressed.zip' });
-    send({ type: 'done', stats, downloadId });
+    send({ type: 'done', stats, downloadId, outSize });
   } catch (err) {
     send({ type: 'error', error: err.message });
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
   res.end();
+}
+
+/**
+ * Raw-body ZIP upload (fallback / non-chunked clients): the request body is a
+ * .zip streamed straight to a temp file, then processed.
+ */
+async function handleCompressZip(req, res, opts) {
+  const dir = await mkdtemp(join(tmpdir(), 'shrinkray-'));
+  const inPath = join(dir, 'in.zip');
+  try {
+    await pipeline(req, createWriteStream(inPath));
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    if (!res.headersSent) sendJson(res, 400, { error: `Upload failed: ${err.message}` });
+    return;
+  }
+  await processZipAndStream(res, inPath, dir, opts);
+}
+
+// ---------------------------------------------------------------------------
+// Chunked / resumable upload
+// ---------------------------------------------------------------------------
+
+async function handleUploadInit(req, res) {
+  const body = JSON.parse((await readBody(req, 64 * 1024)).toString() || '{}');
+  const { id, size } = await createUpload({ filename: body.filename, size: Number(body.size) });
+  sendJson(res, 200, { id, size });
+}
+
+async function handleUploadChunk(req, res, id, offset) {
+  const buf = await readBody(req, 128 * 1024 * 1024); // one chunk, generous cap
+  const status = await writeChunk(id, offset, buf);
+  sendJson(res, 200, status);
+}
+
+function handleUploadStatus(req, res, id) {
+  const status = uploadStatus(id);
+  if (!status) return sendJson(res, 404, { error: 'Upload session not found' });
+  sendJson(res, 200, status);
+}
+
+/** Finalize a chunked upload and process the assembled ZIP. */
+async function handleUploadProcess(req, res, id, opts) {
+  let session;
+  try {
+    session = await finalizeUpload(id);
+  } catch (err) {
+    return sendJson(res, err.status || 400, { error: err.message });
+  }
+  await processZipAndStream(res, session.path, session.dir, opts);
 }
 
 async function serveStatic(req, res, pathname) {
@@ -365,13 +444,29 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/formats') {
       return sendJson(res, 200, { formats: await availableFormats(), targets: Object.keys(QUALITY_TARGETS) });
     }
+    // Chunked / resumable upload
+    if (req.method === 'POST' && url.pathname === '/api/upload/init') {
+      return await handleUploadInit(req, res);
+    }
+    if (req.method === 'PUT' && url.pathname.startsWith('/api/upload/chunk/')) {
+      const id = decodeURIComponent(url.pathname.slice('/api/upload/chunk/'.length));
+      return await handleUploadChunk(req, res, id, Number(url.searchParams.get('offset')));
+    }
+    if (req.method === 'GET' && url.pathname.startsWith('/api/upload/status/')) {
+      return handleUploadStatus(req, res, decodeURIComponent(url.pathname.slice('/api/upload/status/'.length)));
+    }
+    if (req.method === 'POST' && url.pathname.startsWith('/api/upload/process/')) {
+      const id = decodeURIComponent(url.pathname.slice('/api/upload/process/'.length));
+      return await handleUploadProcess(req, res, id, optionsFromQuery(url.searchParams));
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/compress-zip') {
       return await handleCompressZip(req, res, optionsFromQuery(url.searchParams));
     }
     if (req.method === 'POST' && url.pathname === '/api/compress') {
       return await handleCompress(req, res);
     }
-    if (req.method === 'GET' && url.pathname.startsWith('/api/download/')) {
+    if ((req.method === 'GET' || req.method === 'HEAD') && url.pathname.startsWith('/api/download/')) {
       return await handleDownload(req, res, decodeURIComponent(url.pathname.slice('/api/download/'.length)));
     }
     if (req.method === 'GET') return await serveStatic(req, res, url.pathname);

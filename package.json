@@ -1,6 +1,6 @@
 {
   "name": "shrinkray",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Local-first image compressor. Target a file size in KB, or target visual quality and let it find the smallest file. AVIF, WebP, JPEG, PNG, JXL. ZIP in/out, parallel, handles 1GB+ archives.",
   "type": "module",
   "license": "MIT",
