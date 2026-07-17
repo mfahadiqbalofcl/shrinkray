@@ -18,9 +18,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const WORKER_PATH = join(__dirname, 'worker.js');
 
 export function defaultPoolSize() {
-  // One worker per core saturates the machine; cap so we don't spawn absurd
-  // numbers on big hosts (each worker loads its own sharp/libvips).
-  return Math.max(1, Math.min(os.cpus().length, 16));
+  // Leave two logical cores for the main thread + OS, and cap at 8. Heavy image
+  // encoding is bound by PHYSICAL cores, so more workers past that mostly add
+  // memory (each holds its own sharp + a full raw-decoded image) without speed.
+  const cores = os.cpus().length;
+  const env = Number(process.env.SHRINKRAY_WORKERS);
+  if (env > 0) return Math.min(env, 32);
+  return Math.max(2, Math.min(cores - 2, 8));
 }
 
 export class Pool {

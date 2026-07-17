@@ -51,7 +51,7 @@ const QUALITY_SEED = {
  * @param {number} maxIters
  */
 async function bisect(probe, satisfies, prefer, range, seed, opts = {}) {
-  const { maxIters = 5, goodEnough } = opts;
+  const { maxIters = 5, goodEnough, beatSize } = opts;
   let [lo, hi] = range;
   let best = null;
   const seen = new Map();
@@ -77,6 +77,17 @@ async function bisect(probe, satisfies, prefer, range, seed, opts = {}) {
     // encode+metric wouldn't buy a meaningfully better result. This is what
     // turns a good seed into a 2-3 probe search instead of a full 5.
     if (ok && goodEnough?.(cand)) break;
+
+    // Auto-mode pruning: this format already meets fidelity but is bigger than
+    // the current best across formats, so it can't win — stop searching it.
+    if (ok && beatSize && cand.size >= beatSize) break;
+
+    // Unreachable-target guard (quality mode). If a near-max-quality probe still
+    // can't meet the ceiling, no format setting will on this image — accept the
+    // best effort now instead of grinding q93 -> q100 (which is slow AND
+    // balloons the file for a fidelity gain nobody can see). This is the single
+    // biggest speed win on already-compressed sources in Auto mode.
+    if (!ok && cand.dir === 'down' && cand.quality >= 93) break;
 
     // 'down': quality up lowers DSSIM (satisfies) — a satisfying probe means we
     // can try LOWER quality (smaller file). 'up': quality up grows the file —
@@ -140,9 +151,15 @@ export async function searchByQuality(input, format, opts = {}) {
     (a, b) => a.size < b.size,
     format.qualityRange,
     seed,
-    // "Near-optimal" = within the ceiling but close to it: lowering quality
-    // further would breach it, so this is about the smallest safe file.
-    { goodEnough: (c) => c.dssim >= ceiling * 0.75 }
+    {
+      maxIters: opts.maxIters ?? 5,
+      // "Near-optimal" = within the ceiling but close to it: lowering quality
+      // further would breach it, so this is about the smallest safe file.
+      goodEnough: (c) => c.dssim >= ceiling * 0.75,
+      // Auto mode passes the best size found so far. A candidate that already
+      // meets fidelity but is bigger than the current winner can't win — stop.
+      beatSize: opts.beatSize,
+    }
   );
 
   // If nothing hit the ceiling (e.g. a noisy source at a strict target), fall

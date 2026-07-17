@@ -47,6 +47,8 @@ export async function compress(input, options) {
     maxEdge: options.maxEdge,
     background: options.background,
     source: options.source, // shared pre-decoded pixels (compressAuto passes this)
+    beatSize: options.beatSize, // auto-mode pruning: stop if we can't beat this
+    maxIters: options.maxIters,
   };
 
   let result;
@@ -75,22 +77,31 @@ export async function compress(input, options) {
  * @param {(ev:{format:string,phase:string})=>void} [onProgress]
  */
 export async function compressAuto(input, options, onProgress) {
-  const wanted = options.formats?.length
+  // Best-compressing formats first. In quality mode the winner is almost always
+  // AVIF/JXL, so trying them first sets a tight size to beat — later formats
+  // then bail the moment they exceed it instead of running a full search.
+  const PREFERENCE = ['avif', 'jxl', 'webp', 'jpeg'];
+  const requested = options.formats?.length
     ? options.formats
     : (await availableFormats()).map((f) => f.id).filter((id) => id !== 'png');
+  const wanted = PREFERENCE.filter((id) => requested.includes(id)).concat(requested.filter((id) => !PREFERENCE.includes(id)));
 
   // Decode the original ONCE and share the raw pixels with every format, so a
   // 3-5 way comparison doesn't re-decode (and re-orient) the source each time.
   const source = await decodeSource(input, { maxEdge: options.maxEdge });
 
   const candidates = [];
+  let bestSize = Infinity; // running smallest, used to prune losing formats
   for (const id of wanted) {
     const fmt = getFormat(id);
     if (!(await fmt.available())) continue;
     onProgress?.({ format: id, phase: 'start' });
     try {
-      const r = await compress(input, { ...options, format: id, source });
+      // In quality mode, tell each format the size it must beat to matter.
+      const beatSize = options.mode !== 'size' && Number.isFinite(bestSize) ? bestSize : undefined;
+      const r = await compress(input, { ...options, format: id, source, beatSize });
       candidates.push(r);
+      if (r.targetMet !== false && r.size < bestSize) bestSize = r.size;
       onProgress?.({ format: id, phase: 'done' });
     } catch (err) {
       onProgress?.({ format: id, phase: 'error', message: err.message });

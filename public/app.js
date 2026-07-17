@@ -109,155 +109,228 @@ function bindDropzone() {
     drop.addEventListener(ev, (e) => { e.preventDefault(); if (ev === 'dragleave' && drop.contains(e.relatedTarget)) return; drop.classList.remove('dragging'); })
   );
   drop.addEventListener('drop', (e) => {
-    const files = [...(e.dataTransfer?.files || [])].filter((f) => f.type.startsWith('image/'));
+    const files = [...(e.dataTransfer?.files || [])].filter(acceptable);
     if (files.length) handleFiles(files);
   });
 
   // Paste an image from the clipboard.
   window.addEventListener('paste', (e) => {
-    const files = [...(e.clipboardData?.files || [])].filter((f) => f.type.startsWith('image/'));
+    const files = [...(e.clipboardData?.files || [])].filter(acceptable);
     if (files.length) handleFiles(files);
   });
 }
+
+// Accept images and ZIP archives (a ZIP has no image/* MIME type).
+const acceptable = (f) => f.type.startsWith('image/') || isZipFile(f);
 
 const isZipFile = (f) => /\.zip$/i.test(f.name) || f.type === 'application/zip' || f.type === 'application/x-zip-compressed';
 
 async function handleFiles(files) {
   const zips = files.filter(isZipFile);
   const images = files.filter((f) => !isZipFile(f));
-
-  // A dropped ZIP is a batch of its own; images are compressed together.
-  for (const zip of zips) await compressBatch([zip], { zip: true });
-  if (images.length) await compressBatch(images, { zip: false });
+  for (const zip of zips) await runZip(zip); // each ZIP is its own streamed batch
+  if (images.length) await runLoose(images); // loose images compress together
 }
 
-/** Build the multipart form for a compress request. */
-function buildForm(files) {
-  const fd = new FormData();
-  fd.append('mode', state.mode);
-  fd.append('format', state.format);
-  if (state.mode === 'quality') fd.append('target', state.target);
-  else fd.append('targetKB', String(state.targetKB));
-  fd.append('effort', String(state.effort));
-  if (state.maxEdge) fd.append('maxEdge', String(state.maxEdge));
-  for (const f of files) fd.append('image', f, f.name);
-  return fd;
+function settingsParams() {
+  const p = new URLSearchParams();
+  p.set('mode', state.mode);
+  p.set('format', state.format);
+  if (state.mode === 'quality') p.set('target', state.target);
+  else p.set('targetKB', String(state.targetKB));
+  p.set('effort', String(state.effort));
+  if (state.maxEdge) p.set('maxEdge', String(state.maxEdge));
+  return p;
 }
 
 /**
- * POST files and consume the server's NDJSON progress stream. Loose images get
- * a result card each as they finish; a ZIP gets the batch panel + a download.
+ * XHR POST with a real upload-progress callback plus an incremental NDJSON
+ * response reader. fetch() cannot report upload progress — which is exactly what
+ * a 400 MB / 1 GB upload needs — so we use XHR here.
  */
-async function compressBatch(files, { zip }) {
-  // Keep object URLs so result cards can show the "before" image.
-  const originals = new Map(files.map((f) => [f.name, f]));
+function streamPost(url, body, onUpload, onEvent, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    for (const [k, v] of Object.entries(headers)) xhr.setRequestHeader(k, v);
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onUpload(e.loaded, e.total); };
+    xhr.upload.onload = () => onUpload(-1, -1); // signal: upload body fully sent
 
-  const res = await fetch('/api/compress', { method: 'POST', body: buildForm(files) });
-  if (!res.ok || !res.body) {
-    const msg = await res.json().catch(() => ({}));
-    throw new Error(msg.error || `Server error ${res.status}`);
-  }
-
-  const cards = new Map(); // name -> pending card element (loose mode)
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (line) handleEvent(JSON.parse(line), { zip, originals, cards });
-    }
-  }
+    let cursor = 0;
+    const drain = () => {
+      const text = xhr.responseText;
+      let nl;
+      while ((nl = text.indexOf('\n', cursor)) >= 0) {
+        const line = text.slice(cursor, nl).trim();
+        cursor = nl + 1;
+        if (line) { try { onEvent(JSON.parse(line)); } catch { /* partial line */ } }
+      }
+    };
+    xhr.onprogress = drain;
+    xhr.onload = () => { drain(); (xhr.status >= 200 && xhr.status < 300) ? resolve() : reject(new Error(safeErr(xhr) || `Server error ${xhr.status}`)); };
+    xhr.onerror = () => reject(new Error('Network error — is the server running?'));
+    xhr.send(body);
+  });
 }
 
-function handleEvent(ev, ctx) {
-  switch (ev.type) {
-    case 'start':
-      if (ctx.zip || ev.total > 1) showBatch(ev);
-      break;
-    case 'result': // loose image finished
-      if (ev.ok) {
-        const file = ctx.originals.get(ev.name);
-        renderResult(renderPending(ev.name), file, { name: ev.name, best: ev.best });
-      } else {
-        renderError(renderPending(ev.name), ev.name, ev.error);
-      }
-      bumpBatchLoose(ctx.originals.size);
-      break;
-    case 'progress': // zip image finished (no preview)
-      updateBatch(ev);
-      break;
-    case 'done':
-      finishBatch(ev, ctx);
-      break;
-    case 'error':
-      failBatch(ev.error);
-      break;
-  }
+function safeErr(xhr) { try { return JSON.parse(xhr.responseText).error; } catch { return null; } }
+
+/** Any ZIP: raw-body upload (streamed to disk server-side) + staged UI. */
+async function runZip(zip) {
+  const b = beginBatch({ zip: true, title: zip.name });
+  await streamPost(
+    `/api/compress-zip?${settingsParams().toString()}`,
+    zip,
+    (l, t) => b.onUpload(l, t),
+    (ev) => b.onEvent(ev),
+    { 'Content-Type': 'application/zip' }
+  ).catch((err) => b.fail(err.message));
+}
+
+/** Loose images: multipart upload + per-image result cards. */
+async function runLoose(images) {
+  const fd = new FormData();
+  for (const [k, v] of settingsParams()) fd.append(k, v);
+  for (const f of images) fd.append('image', f, f.name);
+  const originals = new Map(images.map((f) => [f.name, f]));
+  const b = beginBatch({ zip: false, title: `${images.length} image${images.length > 1 ? 's' : ''}`, showPanel: images.length > 1, originals });
+  await streamPost('/api/compress', fd, (l, t) => b.onUpload(l, t), (ev) => b.onEvent(ev)).catch((err) => b.fail(err.message));
 }
 
 // ---------------------------------------------------------------------------
-// Batch panel (ZIPs and multi-image runs)
+// Staged batch panel — one controller per run
 // ---------------------------------------------------------------------------
 
 const batchEl = $('#batch');
-let batchDone = 0;
+const STEP_ORDER = ['upload', 'read', 'compress', 'package', 'ready'];
 
-function showBatch(ev) {
-  batchDone = 0;
-  batchEl.classList.remove('hidden');
-  $('#batchTitle').textContent = ev.isZip ? 'Compressing ZIP…' : `Compressing ${ev.total} images…`;
-  $('#batchCount').textContent = `0 / ${ev.total}`;
-  $('#batchBar').style.width = '0%';
-  $('#batchFoot').textContent = ev.skipped ? `${ev.skipped} non-image file(s) will be skipped` : '';
-  const dl = $('#batchDownload');
-  dl.classList.add('hidden');
-  dl.removeAttribute('href');
+function beginBatch({ zip, title, showPanel = true, originals }) {
+  const st = { zip, panel: showPanel, total: 0, done: 0, startCompress: 0, uploadStart: performance.now(), originals };
+  if (showPanel) {
+    batchEl.classList.remove('hidden');
+    $('#batchTitle').textContent = `Compressing ${title}`;
+    $('#batchCount').textContent = '';
+    $('#batchFoot').textContent = '';
+    $('#batchEta').textContent = '';
+    $('#batchBar').style.width = '0%';
+    indeterminate(false);
+    const dl = $('#batchDownload'); dl.classList.add('hidden'); dl.removeAttribute('href');
+    for (const s of STEP_ORDER) { setStep(s, ''); setStepNote(s, ''); }
+    stepEl('read').style.display = zip ? '' : 'none';
+    stepEl('package').style.display = zip ? '' : 'none';
+    setStep('upload', 'active');
+  }
+  return {
+    onUpload(loaded, total) {
+      if (!st.panel) return;
+      if (loaded === -1) { // upload done
+        setStep('upload', 'done', 'sent');
+        setStep(zip ? 'read' : 'compress', 'active');
+        indeterminate(true);
+        $('#batchEta').textContent = '';
+        return;
+      }
+      indeterminate(false);
+      const pct = total ? loaded / total : 0;
+      $('#batchBar').style.width = `${Math.round(pct * 100)}%`;
+      setStepNote('upload', `${fmtSize(loaded)} / ${fmtSize(total)}`);
+      const secs = (performance.now() - st.uploadStart) / 1000;
+      const mbps = secs > 0 ? loaded / 1024 / 1024 / secs : 0;
+      $('#batchEta').textContent = mbps > 0 ? `${mbps.toFixed(1)} MB/s` : '';
+    },
+    onEvent(ev) { handleBatchEvent(ev, st); },
+    fail(msg) {
+      if (!st.panel) { renderError(renderPending('upload'), 'Upload', msg); return; }
+      indeterminate(false);
+      $('#batchTitle').textContent = 'Failed';
+      const active = STEP_ORDER.find((s) => stepEl(s).classList.contains('active'));
+      if (active) setStep(active, '', '✕');
+      $('#batchFoot').textContent = msg;
+    },
+  };
 }
 
-function updateBatch(ev) {
-  batchDone = ev.done;
-  $('#batchCount').textContent = `${ev.done} / ${ev.total}`;
-  $('#batchBar').style.width = `${Math.round((ev.done / ev.total) * 100)}%`;
+function handleBatchEvent(ev, st) {
+  switch (ev.type) {
+    case 'uploaded':
+      setStep('upload', 'done', fmtSize(ev.size));
+      break;
+    case 'stage':
+      if (ev.stage === 'reading') { setStep('read', 'active'); indeterminate(true); }
+      else if (ev.stage === 'packaging') { setStep('compress', 'done'); setStep('package', 'active'); indeterminate(true); $('#batchEta').textContent = ''; }
+      break;
+    case 'start':
+      st.total = ev.total; st.startCompress = performance.now();
+      setStep('read', 'done', `${ev.total} image${ev.total !== 1 ? 's' : ''}${ev.skipped ? ` · ${ev.skipped} skipped` : ''}`);
+      setStep('compress', 'active');
+      indeterminate(false);
+      $('#batchCount').textContent = `0 / ${ev.total}`;
+      break;
+    case 'result': // loose image finished (with preview)
+      if (st.panel) { st.done++; updateCompress(st); }
+      if (ev.ok) renderResult(renderPending(ev.name), st.originals?.get(ev.name), { name: ev.name, best: ev.best });
+      else renderError(renderPending(ev.name), ev.name, ev.error);
+      break;
+    case 'progress': // zip image finished
+      st.done = ev.done; st.total = ev.total; st.lastIn = ev.totalIn; st.lastOut = ev.totalOut;
+      updateCompress(st);
+      break;
+    case 'done':
+      finishBatch(ev, st);
+      break;
+    case 'error':
+      if (st.panel) { indeterminate(false); $('#batchTitle').textContent = 'Failed'; $('#batchFoot').textContent = ev.error; }
+      break;
+  }
 }
 
-function bumpBatchLoose(total) {
-  if (batchEl.classList.contains('hidden')) return;
-  batchDone++;
-  $('#batchCount').textContent = `${batchDone} / ${total}`;
-  $('#batchBar').style.width = `${Math.round((batchDone / total) * 100)}%`;
+function updateCompress(st) {
+  if (!st.panel || !st.total) return;
+  indeterminate(false);
+  $('#batchBar').style.width = `${Math.round((st.done / st.total) * 100)}%`;
+  $('#batchCount').textContent = `${st.done} / ${st.total}`;
+  setStepNote('compress', `${st.done} / ${st.total}`);
+  if (st.lastIn) $('#batchFoot').innerHTML = `${fmtSize(st.lastIn)} → <span class="big">${fmtSize(st.lastOut)}</span> so far`;
+  const secs = (performance.now() - st.startCompress) / 1000;
+  if (secs > 1 && st.done > 0) {
+    const rate = st.done / secs;
+    const remain = (st.total - st.done) / rate;
+    $('#batchEta').textContent = remain > 0.5 ? `~${fmtTime(remain)} left · ${rate.toFixed(1)}/s` : '';
+  }
 }
 
-function finishBatch(ev, ctx) {
-  if (batchEl.classList.contains('hidden')) return; // single image, no panel
+function finishBatch(ev, st) {
+  if (!st.panel) return;
   const s = ev.stats || {};
+  for (const step of STEP_ORDER) setStep(step, 'done');
+  indeterminate(false);
   $('#batchBar').style.width = '100%';
-  $('#batchTitle').textContent = ctx.zip ? 'ZIP compressed' : 'Done';
-  $('#batchCount').textContent = `${s.compressed} / ${s.images}`;
-  const saved = s.percentSaved ?? 0;
+  $('#batchTitle').textContent = st.zip ? 'ZIP ready' : 'Done';
+  $('#batchCount').textContent = `${s.compressed ?? st.done} / ${s.images ?? st.total}`;
+  setStepNote('ready', 'done');
   $('#batchFoot').innerHTML =
-    `${fmtSize(s.totalIn)} → <span class="big">${fmtSize(s.totalOut)}</span> · ${saved}% smaller` +
-    (s.failed ? ` · ${s.failed} failed` : '') +
-    (s.skipped ? ` · ${s.skipped} skipped` : '');
+    `${fmtSize(s.totalIn)} → <span class="big">${fmtSize(s.totalOut)}</span> · ${s.percentSaved ?? 0}% smaller` +
+    (s.failed ? ` · ${s.failed} failed` : '') + (s.skipped ? ` · ${s.skipped} skipped` : '');
+  $('#batchEta').textContent = '';
   const dl = $('#batchDownload');
   if (ev.downloadId) {
     dl.href = `/api/download/${ev.downloadId}`;
-    dl.textContent = ctx.zip ? '↓ Download ZIP' : '↓ Download all as ZIP';
+    dl.textContent = st.zip ? '↓ Download ZIP' : '↓ Download all as ZIP';
     dl.classList.remove('hidden');
   }
 }
 
-function failBatch(message) {
-  if (batchEl.classList.contains('hidden')) return;
-  $('#batchTitle').textContent = 'Failed';
-  $('#batchFoot').textContent = message;
+// step + bar helpers
+function stepEl(name) { return batchEl.querySelector(`.step[data-step="${name}"]`); }
+function setStep(name, cls, note) {
+  const el = stepEl(name);
+  el.classList.remove('active', 'done');
+  if (cls) el.classList.add(cls);
+  if (note !== undefined) setStepNote(name, note);
 }
+function setStepNote(name, note) { stepEl(name).querySelector('[data-note]').textContent = note || ''; }
+function indeterminate(on) { const bar = $('#batchBar'); bar.classList.toggle('indeterminate', on); if (on) bar.style.width = ''; }
+function fmtTime(s) { if (s < 60) return `${Math.ceil(s)}s`; const m = Math.floor(s / 60); return `${m}m ${Math.round(s % 60)}s`; }
 
 // ---------------------------------------------------------------------------
 // Rendering

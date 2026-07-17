@@ -15,20 +15,27 @@
  */
 
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, stat } from 'node:fs/promises';
+import { createWriteStream, createReadStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, extname } from 'node:path';
+import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { availableFormats, QUALITY_TARGETS } from './pipeline.js';
 import { parseMultipart } from './multipart.js';
 import { compressMany } from './batch.js';
 import { readZip, writeZip, rewriteExtension } from './zip.js';
+import { processZipFile } from './largezip.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(__dirname, '..', 'public');
 
-const MAX_UPLOAD = 512 * 1024 * 1024; // 512MB — ZIPs of many photos get big
-const DOWNLOAD_TTL_MS = 15 * 60 * 1000;
+// Loose-image (multipart) uploads are held in memory, so keep a sane cap. Large
+// archives go through the raw-body ZIP endpoint, which streams to disk and has
+// no practical size limit.
+const MAX_MULTIPART = 512 * 1024 * 1024;
+const DOWNLOAD_TTL_MS = 30 * 60 * 1000;
 
 const STATIC_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -38,14 +45,22 @@ const STATIC_TYPES = {
   '.ico': 'image/x-icon',
 };
 
-// Packaged ZIP results, keyed by id, briefly held for download.
+// Packaged results, keyed by id, briefly held for download. A result is either
+// an in-memory buffer (loose "download all") or a path to a ZIP on disk (large
+// archive output, never loaded into memory).
 const downloads = new Map();
-function stashDownload(buffer, filename) {
+function stashDownload(item) {
   const id = randomUUID();
-  const timer = setTimeout(() => downloads.delete(id), DOWNLOAD_TTL_MS);
+  const timer = setTimeout(() => discardDownload(id), DOWNLOAD_TTL_MS);
   timer.unref?.();
-  downloads.set(id, { buffer, filename });
+  downloads.set(id, item); // { buffer, filename } | { path, dir, filename }
   return id;
+}
+async function discardDownload(id) {
+  const item = downloads.get(id);
+  if (!item) return;
+  downloads.delete(id);
+  if (item.dir) await rm(item.dir, { recursive: true, force: true }).catch(() => {});
 }
 
 function sendJson(res, status, body) {
@@ -54,14 +69,14 @@ function sendJson(res, status, body) {
   res.end(data);
 }
 
-function readBody(req, limit = MAX_UPLOAD) {
+function readBody(req, limit = MAX_MULTIPART) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
     req.on('data', (c) => {
       size += c.length;
       if (size > limit) {
-        reject(Object.assign(new Error('Upload too large'), { status: 413 }));
+        reject(Object.assign(new Error('Upload too large for in-memory handling — send it as a .zip instead'), { status: 413 }));
         req.destroy();
         return;
       }
@@ -70,6 +85,19 @@ function readBody(req, limit = MAX_UPLOAD) {
     req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+
+/** Options from URL query params (raw-body ZIP endpoint). */
+function optionsFromQuery(params) {
+  const mode = params.get('mode') === 'size' ? 'size' : 'quality';
+  return {
+    mode,
+    format: params.get('format') || 'auto',
+    target: params.get('target') || 'high',
+    targetKB: params.get('targetKB') ? Number(params.get('targetKB')) : undefined,
+    effort: params.get('effort') ? Number(params.get('effort')) : undefined,
+    maxEdge: params.get('maxEdge') ? Number(params.get('maxEdge')) : undefined,
+  };
 }
 
 function optionsFromFields(fields) {
@@ -180,7 +208,7 @@ async function runLoose(files, opts, send) {
   let downloadId = null;
   if (zipEntries.length > 1) {
     const buffer = await writeZip(zipEntries, { 'REPORT.txt': looseReport(collected, totalIn, totalOut) });
-    downloadId = stashDownload(buffer, 'shrinkray-images.zip');
+    downloadId = stashDownload({ buffer, filename: 'shrinkray-images.zip' });
   }
   send({
     type: 'done',
@@ -254,15 +282,67 @@ function zipReport(manifest, skipped) {
   return lines.join('\n') + '\n';
 }
 
-function handleDownload(req, res, id) {
+async function handleDownload(req, res, id) {
   const item = downloads.get(id);
   if (!item) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Download expired or not found'); }
-  res.writeHead(200, {
+  const headers = {
     'content-type': 'application/zip',
-    'content-length': item.buffer.length,
     'content-disposition': `attachment; filename="${item.filename}"`,
-  });
-  res.end(item.buffer);
+  };
+  if (item.buffer) {
+    headers['content-length'] = item.buffer.length;
+    res.writeHead(200, headers);
+    return res.end(item.buffer);
+  }
+  // Disk-backed result (large ZIP): stream it, never load it into memory.
+  const st = await stat(item.path).catch(() => null);
+  if (!st) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Download no longer available'); }
+  headers['content-length'] = st.size;
+  res.writeHead(200, headers);
+  createReadStream(item.path).pipe(res);
+}
+
+/**
+ * Large ZIP upload: the raw request body is a .zip, streamed straight to a temp
+ * file (never buffered in memory), then processed entry-by-entry to a result
+ * ZIP on disk. Progress is streamed back as NDJSON with named stages. This is
+ * the path that handles 431 MB / 1 GB+ archives.
+ */
+async function handleCompressZip(req, res, opts) {
+  const dir = await mkdtemp(join(tmpdir(), 'shrinkray-'));
+  const inPath = join(dir, 'in.zip');
+  const outPath = join(dir, 'out.zip');
+
+  // Phase 1: receive the upload, streaming to disk. (The browser shows upload
+  // progress from its own XHR.upload events during this.)
+  try {
+    await pipeline(req, createWriteStream(inPath));
+  } catch (err) {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+    if (!res.headersSent) sendJson(res, 400, { error: `Upload failed: ${err.message}` });
+    return;
+  }
+
+  // Phase 2: process, streaming staged progress.
+  res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-cache' });
+  const send = (obj) => res.write(JSON.stringify(obj) + '\n');
+  try {
+    const uploadedSize = (await stat(inPath)).size;
+    send({ type: 'uploaded', size: uploadedSize });
+    const { stats } = await processZipFile(inPath, outPath, opts, (ev) => {
+      if (ev.stage === 'reading') send({ type: 'stage', stage: 'reading' });
+      else if (ev.stage === 'start') send({ type: 'start', total: ev.total, skipped: ev.skipped, isZip: true });
+      else if (ev.stage === 'compressing') send({ type: 'progress', done: ev.done, total: ev.total, totalIn: ev.totalIn, totalOut: ev.totalOut, name: ev.name });
+      else if (ev.stage === 'packaging') send({ type: 'stage', stage: 'packaging' });
+    });
+    await rm(inPath, { force: true }).catch(() => {}); // input no longer needed
+    const downloadId = stashDownload({ path: outPath, dir, filename: 'shrinkray-compressed.zip' });
+    send({ type: 'done', stats, downloadId });
+  } catch (err) {
+    send({ type: 'error', error: err.message });
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+  res.end();
 }
 
 async function serveStatic(req, res, pathname) {
@@ -285,11 +365,14 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && url.pathname === '/api/formats') {
       return sendJson(res, 200, { formats: await availableFormats(), targets: Object.keys(QUALITY_TARGETS) });
     }
+    if (req.method === 'POST' && url.pathname === '/api/compress-zip') {
+      return await handleCompressZip(req, res, optionsFromQuery(url.searchParams));
+    }
     if (req.method === 'POST' && url.pathname === '/api/compress') {
       return await handleCompress(req, res);
     }
     if (req.method === 'GET' && url.pathname.startsWith('/api/download/')) {
-      return handleDownload(req, res, decodeURIComponent(url.pathname.slice('/api/download/'.length)));
+      return await handleDownload(req, res, decodeURIComponent(url.pathname.slice('/api/download/'.length)));
     }
     if (req.method === 'GET') return await serveStatic(req, res, url.pathname);
     sendJson(res, 405, { error: 'Method not allowed' });

@@ -90,11 +90,24 @@
         <!-- Batch progress + summary (shown for ZIPs and large batches) -->
         <section class="panel batch hidden" id="batch" aria-live="polite">
           <div class="batch-head">
-            <span class="batch-title" id="batchTitle">Compressing…</span>
-            <span class="batch-count mono" id="batchCount">0 / 0</span>
+            <span class="batch-title" id="batchTitle">Working…</span>
+            <span class="batch-count mono" id="batchCount"></span>
           </div>
+
+          <!-- Pipeline steps -->
+          <ol class="steps" id="steps">
+            <li class="step" data-step="upload"><span class="step-dot"></span><span class="step-label">Uploading</span><span class="step-note" data-note></span></li>
+            <li class="step" data-step="read"><span class="step-dot"></span><span class="step-label">Reading ZIP</span><span class="step-note" data-note></span></li>
+            <li class="step" data-step="compress"><span class="step-dot"></span><span class="step-label">Compressing</span><span class="step-note" data-note></span></li>
+            <li class="step" data-step="package"><span class="step-dot"></span><span class="step-label">Packaging</span><span class="step-note" data-note></span></li>
+            <li class="step" data-step="ready"><span class="step-dot"></span><span class="step-label">Ready</span><span class="step-note" data-note></span></li>
+          </ol>
+
           <div class="bar"><div class="bar-fill" id="batchBar"></div></div>
-          <div class="batch-foot" id="batchFoot"></div>
+          <div class="batch-stats">
+            <span class="batch-foot" id="batchFoot"></span>
+            <span class="batch-eta mono" id="batchEta"></span>
+          </div>
           <a class="btn primary hidden" id="batchDownload" download>↓ Download ZIP</a>
         </section>
 

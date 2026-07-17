@@ -210,15 +210,38 @@ input[type="range"] { flex: 1; accent-color: var(--accent); }
 .linklike { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; text-decoration: underline; text-underline-offset: 2px; }
 
 /* ---------- batch progress ---------- */
-.batch { display: flex; flex-direction: column; gap: 12px; }
+.batch { display: flex; flex-direction: column; gap: 14px; }
 .batch-head { display: flex; align-items: baseline; justify-content: space-between; }
-.batch-title { font-weight: 600; font-size: 15px; }
+.batch-title { font-weight: 650; font-size: 16px; letter-spacing: -0.01em; }
 .batch-count { color: var(--ink-dim); font-size: 13px; }
-.bar { height: 8px; background: var(--bg-elev-2); border: 1px solid var(--line-soft); border-radius: 20px; overflow: hidden; }
-.bar-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #7cf)); border-radius: 20px; transition: width 0.3s ease; }
-.batch-foot { font-size: 13px; color: var(--ink-dim); font-family: var(--mono); min-height: 1.2em; }
+
+/* pipeline steps */
+.steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.step { display: flex; align-items: center; gap: 11px; padding: 5px 0; font-size: 13.5px; color: var(--ink-faint); transition: color 0.2s; }
+.step-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line); flex-shrink: 0; position: relative; transition: border-color 0.2s, background 0.2s; }
+.step-label { font-weight: 500; }
+.step-note { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--ink-faint); }
+/* done */
+.step.done { color: var(--ink-dim); }
+.step.done .step-dot { border-color: var(--accent); background: var(--accent); }
+.step.done .step-dot::after { content: "✓"; position: absolute; inset: 0; display: grid; place-items: center; font-size: 10px; font-weight: 900; color: var(--accent-ink); }
+/* active */
+.step.active { color: var(--ink); }
+.step.active .step-label { font-weight: 650; }
+.step.active .step-dot { border-color: var(--accent); border-right-color: transparent; animation: spin 0.7s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .step.active .step-dot { animation: none; border-color: var(--accent); } }
+
+.bar { height: 10px; background: var(--bg-elev-2); border: 1px solid var(--line-soft); border-radius: 20px; overflow: hidden; position: relative; }
+.bar-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 55%, #6cf)); border-radius: 20px; transition: width 0.25s ease; }
+.bar-fill.indeterminate { width: 35% !important; animation: slide 1.1s ease-in-out infinite; will-change: transform; }
+@keyframes slide { 0% { transform: translateX(-110%); } 100% { transform: translateX(310%); } }
+@media (prefers-reduced-motion: reduce) { .bar-fill.indeterminate { animation: none; width: 100% !important; opacity: 0.4; } }
+
+.batch-stats { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 1.2em; flex-wrap: wrap; }
+.batch-foot { font-size: 13px; color: var(--ink-dim); font-family: var(--mono); }
 .batch-foot .big { color: var(--accent); font-weight: 700; font-family: var(--font); }
-#batchDownload { align-self: flex-start; }
+.batch-eta { font-size: 12.5px; color: var(--ink-faint); }
+#batchDownload { align-self: flex-start; margin-top: 2px; }
 
 /* ---------- results ---------- */
 .results { grid-column: 2; display: flex; flex-direction: column; gap: 18px; }

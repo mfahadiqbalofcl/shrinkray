@@ -102,9 +102,29 @@ shrinkray photos.zip --target balanced            # -> photos-compressed.zip
 shrinkray photos.zip --size 200kb -o out.zip      # every image under 200 KB
 ```
 
-In the web UI, a dropped ZIP shows a live progress bar and a **Download ZIP**
-button; a batch of loose images gets **Download all as ZIP** as well as
-individual downloads.
+In the web UI, a dropped ZIP shows a **staged progress panel** — Uploading →
+Reading → Compressing (with a live count, running size saved, and an ETA) →
+Packaging → Ready — then a **Download ZIP** button. A batch of loose images gets
+**Download all as ZIP** as well as individual downloads.
+
+### Big archives (hundreds of MB to multiple GB)
+
+Large ZIPs are handled without ever holding the archive in memory:
+
+- the upload **streams straight to a temp file** on disk as it arrives (the
+  browser shows a real upload-progress bar via `XHR.upload`, because a 400 MB
+  upload should never look frozen);
+- the archive is read **one image at a time** ([yauzl](https://www.npmjs.com/package/yauzl)),
+  each is compressed on the worker pool, and the result is streamed into the
+  output ZIP on disk ([yazl](https://www.npmjs.com/package/yazl));
+- peak memory is bounded by `workers × one decoded image`, **not** by the size
+  of the archive — a 400 MB ZIP and a 4 GB ZIP use about the same RAM;
+- the finished ZIP is streamed back from disk on download.
+
+So a 1 GB folder of photos compresses fine on an ordinary laptop. (It will take
+a few minutes — that's the encoder, not the plumbing — which is exactly why the
+progress panel shows a per-image count and ETA.) Set `SHRINKRAY_WORKERS=N` to
+tune the pool size for your machine's RAM/cores.
 
 ---
 
@@ -208,9 +228,12 @@ Every result carries real measured numbers: `size`, `dssim`, a 0–100 `score`,
 
 - **Local-first.** No network calls. The server binds to `127.0.0.1` and streams
   results from memory — nothing is written to disk or sent anywhere.
-- **Two dependencies.** `sharp` (native image codecs) and `fflate` (ZIP). The
-  HTTP server, streaming multipart parser, worker pool, perceptual metric, and
-  UI are all hand-written and auditable — no framework.
+- **Small, boring dependencies.** `sharp` (native image codecs), `fflate` +
+  `yauzl`/`yazl` (fast, streaming ZIP). The HTTP server, upload streaming,
+  worker pool, perceptual metric, and UI are all hand-written and auditable —
+  no framework.
+- **Memory-bounded.** Large uploads stream to disk and are processed one image
+  at a time, so a 1 GB archive uses about the same RAM as a 50 MB one.
 - **Honest output.** It never hands back a larger file, a missed target, or a
   guessed quality without saying so.
 
