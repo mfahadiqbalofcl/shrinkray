@@ -34,7 +34,7 @@ async function init() {
     const jxl = data.formats.some((f) => f.id === 'jxl');
     $('#engineInfo').textContent = `sharp/libvips · ${data.formats.map((f) => f.label).join(' · ')}${jxl ? '' : ''}`;
   } catch {
-    $('#engineInfo').textContent = 'engine offline — is the server running?';
+    $('#engineInfo').textContent = 'engine offline. Is the server running?';
   }
 }
 
@@ -71,9 +71,18 @@ function bindControls() {
     state.effort = Number(e.target.value);
     $('#effortVal').textContent = state.effort;
   });
+  // Resize preset and the custom Advanced field both drive state.maxEdge and
+  // stay in sync so they never disagree.
+  $('#resize').addEventListener('change', (e) => {
+    const v = Number(e.target.value);
+    state.maxEdge = v > 0 ? v : null;
+    $('#maxEdge').value = v > 0 ? v : '';
+  });
   $('#maxEdge').addEventListener('input', (e) => {
     const v = Number(e.target.value);
     state.maxEdge = v > 0 ? v : null;
+    // reflect a custom value in the preset dropdown (or clear it)
+    $('#resize').value = [0, 4000, 2560, 1920, 1280].includes(v) ? String(v) : '0';
   });
 }
 
@@ -359,6 +368,13 @@ function handleBatchEvent(ev, st) {
       setStep('compress', 'active');
       indeterminate(false);
       $('#batchCount').textContent = `0 / ${ev.total}`;
+      $('#batchFoot').textContent = 'Compressing…';
+      break;
+    case 'ping': // heartbeat during a long encode — keep the UI alive
+      if (st.panel && stepEl('compress').classList.contains('active') && ev.name) {
+        setStepNote('compress', `${st.done} / ${st.total || '?'}`);
+        $('#batchFoot').textContent = `Working on ${baseName(ev.name)}…`;
+      }
       break;
     case 'result': // loose image finished (with preview)
       if (st.panel) { st.done++; updateCompress(st); }
@@ -434,6 +450,7 @@ function setStep(name, cls, note) {
 function setStepNote(name, note) { stepEl(name).querySelector('[data-note]').textContent = note || ''; }
 function indeterminate(on) { const bar = $('#batchBar'); bar.classList.toggle('indeterminate', on); if (on) bar.style.width = ''; }
 function fmtTime(s) { if (s < 60) return `${Math.ceil(s)}s`; const m = Math.floor(s / 60); return `${m}m ${Math.round(s % 60)}s`; }
+function baseName(p) { const b = String(p).split('/').pop(); return b.length > 42 ? b.slice(0, 39) + '…' : b; }
 
 // ---------------------------------------------------------------------------
 // Rendering
@@ -442,14 +459,14 @@ function fmtTime(s) { if (s < 60) return `${Math.ceil(s)}s`; const m = Math.floo
 function renderPending(name) {
   const card = document.createElement('article');
   card.className = 'card pending';
-  card.innerHTML = `<div class="pending-row"><span class="spinner"></span><span><span class="pending-name">${escapeHtml(name)}</span> — finding the smallest file…</span></div>`;
+  card.innerHTML = `<div class="pending-row"><span class="spinner"></span><span><span class="pending-name">${escapeHtml(name)}</span> · finding the smallest file…</span></div>`;
   results.prepend(card);
   return card;
 }
 
 function renderError(card, name, message) {
   card.className = 'card error';
-  card.innerHTML = `<div class="pending-row"><span style="color:var(--danger);font-weight:700">✕</span><span><span class="pending-name">${escapeHtml(name)}</span> — ${escapeHtml(message)}</span></div>`;
+  card.innerHTML = `<div class="pending-row"><span style="color:var(--danger);font-weight:700">✕</span><span><span class="pending-name">${escapeHtml(name)}</span> · ${escapeHtml(message)}</span></div>`;
 }
 
 function renderResult(pendingCard, file, entry) {
@@ -478,10 +495,10 @@ function renderResult(pendingCard, file, entry) {
   // Honest warnings.
   const warn = el('warn');
   const warns = [];
-  if (best.grewLargerThanSource) warns.push('This is larger than your original — the source is already well-optimised. Keep the original.');
+  if (best.grewLargerThanSource) warns.push('This is larger than your original. The source is already well-optimised, so keep the original.');
   if (best.targetMet === false) {
     warns.push(state.mode === 'size'
-      ? "Couldn't reach that size even after downscaling — this is the smallest it goes."
+      ? "Couldn't reach that size even after downscaling. This is the smallest it goes."
       : 'This format could not reach that fidelity. Try AVIF for the best shot at it.');
   }
   if (warns.length) { warn.classList.remove('hidden'); warn.textContent = '⚠ ' + warns.join(' '); }

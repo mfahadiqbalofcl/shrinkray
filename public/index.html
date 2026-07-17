@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>ShrinkRay — local image compressor</title>
+    <title>ShrinkRay · local image compressor</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%97%9C%EF%B8%8F%3C/text%3E%3C/svg%3E" />
     <link rel="stylesheet" href="/style.css" />
   </head>
@@ -31,12 +31,12 @@
           <label class="field">
             <span class="field-label">Fidelity</span>
             <select id="target">
-              <option value="visually-lossless">Visually lossless — can't tell</option>
-              <option value="high" selected>High — pixel-peeping only</option>
-              <option value="balanced">Balanced — great for web</option>
-              <option value="small">Small — noticeable up close</option>
-              <option value="tiny">Tiny — thumbnails</option>
-              <option value="lossless">Lossless — bit-exact</option>
+              <option value="visually-lossless">Visually lossless (can't tell)</option>
+              <option value="high" selected>High (pixel-peeping only)</option>
+              <option value="balanced">Balanced (great for web)</option>
+              <option value="small">Small (noticeable up close)</option>
+              <option value="tiny">Tiny (thumbnails)</option>
+              <option value="lossless">Lossless (bit-exact)</option>
             </select>
           </label>
           <p class="hint">Finds the smallest file that stays within this visual budget, measured perceptually (DSSIM), not guessed.</p>
@@ -56,9 +56,21 @@
         <label class="field">
           <span class="field-label">Format</span>
           <select id="format">
-            <option value="auto" selected>Auto — try all, pick smallest</option>
+            <option value="auto" selected>Auto (try all, pick smallest)</option>
           </select>
         </label>
+
+        <label class="field">
+          <span class="field-label">Resize</span>
+          <select id="resize">
+            <option value="0" selected>Keep original size</option>
+            <option value="4000">Max 4000px</option>
+            <option value="2560">Max 2560px (web)</option>
+            <option value="1920">Max 1920px</option>
+            <option value="1280">Max 1280px</option>
+          </select>
+        </label>
+        <p class="hint">Big camera photos (24MP and up) compress far faster when resized, and 2560px is plenty for most websites.</p>
 
         <details class="advanced">
           <summary>Advanced</summary>
@@ -67,9 +79,9 @@
             <input id="effort" type="range" min="0" max="9" value="4" />
             <span id="effortVal" class="mono">4</span>
           </label>
-          <p class="hint">Higher = smaller files, slower encode. AVIF is the slow one.</p>
+          <p class="hint">Higher effort makes smaller files but encodes slower. AVIF is the slow one.</p>
           <label class="field row">
-            <span class="field-label">Max width/height</span>
+            <span class="field-label">Custom max px</span>
             <input id="maxEdge" type="number" min="0" step="1" placeholder="none" />
             <span class="unit">px</span>
           </label>

@@ -4,6 +4,30 @@ Notable changes to ShrinkRay. The format loosely follows
 [Keep a Changelog](https://keepachangelog.com/). Versions are milestones, not
 npm releases.
 
+## [1.4.0] - Faster on big photos, and it never looks stuck
+
+A folder of 24 to 48 megapixel photos was slow to compress and looked frozen on
+the "Reading ZIP" step while the first huge image encoded.
+
+### Added
+
+- A Resize control in the main panel: Keep original size (default), or cap the
+  longest edge at 4000 / 2560 / 1920 / 1280 px. A 24 MP camera photo encodes
+  several times faster at 2560 px, which is plenty for most websites. The
+  Advanced "Custom max px" field stays in sync with it.
+- A heartbeat on the processing stream. A single high-resolution photo can take
+  10+ seconds to encode, and during that gap the browser buffered the earlier
+  events so the UI sat on "Reading ZIP". The server now sends a heartbeat every
+  second, so the stream keeps flowing, the stage moves to "Compressing" right
+  away, and the panel shows which file it's working on.
+
+### Fixed
+
+- The before/after divider line was drawn on the clipped "before" layer, so it
+  fell in the clipped-away region and never showed. Moved it onto the compare
+  container at the split, with a white outline so it reads over any image.
+- Removed the em dashes from the UI labels and messages.
+
 ## [1.3.0] - Resumable uploads and reliable downloads
 
 Makes the upload and download robust enough to trust with big files.

@@ -352,22 +352,33 @@ function parseRange(header, size) {
  * failure; the output ZIP is kept for download.
  */
 async function processZipAndStream(res, inPath, dir, opts) {
-  res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-cache' });
+  res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' });
   const send = (obj) => res.write(JSON.stringify(obj) + '\n');
   const outPath = join(dir, 'out.zip');
+
+  // A big high-res photo can take 10+ seconds to encode, and during that gap the
+  // browser buffers the earlier events and the UI looks frozen. A heartbeat
+  // every second keeps the stream flowing (so events flush) and lets the client
+  // show that work is still happening. It carries the current filename so the UI
+  // can name what it's working on.
+  let current = '';
+  const heartbeat = setInterval(() => send({ type: 'ping', name: current }), 1000);
+
   try {
     const uploadedSize = (await stat(inPath)).size;
     send({ type: 'uploaded', size: uploadedSize });
     const { stats, outSize } = await processZipFile(inPath, outPath, opts, (ev) => {
       if (ev.stage === 'reading') send({ type: 'stage', stage: 'reading' });
       else if (ev.stage === 'start') send({ type: 'start', total: ev.total, skipped: ev.skipped, isZip: true });
-      else if (ev.stage === 'compressing') send({ type: 'progress', done: ev.done, total: ev.total, totalIn: ev.totalIn, totalOut: ev.totalOut, name: ev.name });
+      else if (ev.stage === 'compressing') { current = ev.name; send({ type: 'progress', done: ev.done, total: ev.total, totalIn: ev.totalIn, totalOut: ev.totalOut, name: ev.name }); }
       else if (ev.stage === 'packaging') send({ type: 'stage', stage: 'packaging' });
     });
+    clearInterval(heartbeat);
     await rm(inPath, { force: true }).catch(() => {}); // input no longer needed
     const downloadId = stashDownload({ path: outPath, dir, filename: 'shrinkray-compressed.zip' });
     send({ type: 'done', stats, downloadId, outSize });
   } catch (err) {
+    clearInterval(heartbeat);
     send({ type: 'error', error: err.message });
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
