@@ -272,7 +272,16 @@ input[type="range"] { flex: 1; accent-color: var(--accent); }
    neutral letterbox bars behind opaque photos. */
 .cmp-img { display: block; width: 100%; height: 100%; object-fit: contain; position: absolute; inset: 0; background: repeating-conic-gradient(#141618 0% 25%, #0e1012 0% 50%) 50% / 22px 22px; }
 .cmp-before-wrap { position: absolute; inset: 0; clip-path: inset(0 calc(100% - var(--pos)) 0 0); }
-.cmp-before-wrap::after { content: ""; position: absolute; top: 0; bottom: 0; right: 0; width: 2px; background: var(--accent); }
+/* Divider line at the split. It lives on the container (not inside the clipped
+   "before" layer, which would clip the line away), positioned at --pos like the
+   handle. The white outline keeps it visible over any image colour. */
+.compare::after {
+  content: ""; position: absolute; top: 0; bottom: 0;
+  left: var(--pos); width: 2px; margin-left: -1px;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.55);
+  z-index: 2; pointer-events: none;
+}
 .cmp-handle {
   position: absolute; top: 50%; left: var(--pos);
   transform: translate(-50%, -50%);
