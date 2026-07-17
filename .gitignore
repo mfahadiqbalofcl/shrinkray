@@ -1,0 +1,4 @@
+node_modules/
+calibrate-out/
+*.log
+.DS_Store

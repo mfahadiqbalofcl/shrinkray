@@ -1,0 +1,48 @@
+{
+  "name": "shrinkray",
+  "version": "1.0.0",
+  "description": "Local-first image compressor. Target a file size in KB, or target visual quality and let it find the smallest file. AVIF, WebP, JPEG, PNG, JXL.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "shrinkray": "./bin/shrinkray.js"
+  },
+  "main": "./src/pipeline.js",
+  "exports": {
+    ".": "./src/pipeline.js",
+    "./metric": "./src/metric.js",
+    "./formats": "./src/formats.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "cli": "node bin/shrinkray.js",
+    "calibrate": "node tools/calibrate.js",
+    "test": "node --test 'test/*.test.js'"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "image",
+    "compression",
+    "avif",
+    "webp",
+    "jpeg",
+    "jxl",
+    "optimize",
+    "squoosh",
+    "target-size",
+    "dssim",
+    "local-first"
+  ],
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "sharp": "^0.35.3"
+  }
+}
