@@ -1,62 +1,48 @@
 # Changelog
 
-All notable changes to ShrinkRay. Format loosely follows
-[Keep a Changelog](https://keepachangelog.com/); versions are milestones, not
+Notable changes to ShrinkRay. The format loosely follows
+[Keep a Changelog](https://keepachangelog.com/). Versions are milestones, not
 npm releases.
 
-## [1.2.0] — Large uploads & staged progress
+## [1.2.0] - Large uploads and staged progress
 
-Handles archives from hundreds of MB up to several GB, with a clear picture of
-what's happening at every step.
+Handles archives from a few hundred MB up to several GB, and shows what's
+happening at each step.
 
 ### Added
 
-- **Streaming, memory-bounded ZIP processing.** Uploads stream straight to a
-  temp file; the archive is read one image at a time (yauzl), compressed on the
-  worker pool, and streamed into the output ZIP on disk (yazl). Peak RAM is
-  bounded by `workers × one decoded image`, not the archive size — a 400 MB ZIP
-  and a 4 GB ZIP use about the same memory.
-- **Real upload-progress bar.** The client uses `XHR` (not `fetch`, which can't
-  report upload progress) so a 400 MB upload no longer looks frozen.
-- **Staged status UI:** Uploading → Reading → Compressing (live count, running
-  size saved, ETA) → Packaging → Ready.
-- `SHRINKRAY_WORKERS=N` to tune the pool size for your machine's RAM/cores.
+- Streaming, memory-bounded ZIP processing. The upload streams to a temp file, the archive is read one image at a time (yauzl), each image is compressed on the worker pool, and the result is streamed into the output ZIP on disk (yazl). Peak RAM is bounded by `workers × one decoded image`, not by the archive size, so a 400 MB ZIP and a 4 GB ZIP use about the same memory.
+- A real upload-progress bar. The client uses `XHR` instead of `fetch` (which can't report upload progress), so a 400 MB upload no longer looks frozen.
+- A staged status panel: Uploading, Reading, Compressing (with a live count, running size saved, and an ETA), Packaging, Ready.
+- `SHRINKRAY_WORKERS=N` to set the pool size for your machine's RAM and cores.
 
 ### Changed
 
-- Quality search stops climbing near max quality on unreachable fidelity
-  targets — kills the WebP-to-q100 balloon on already-compressed sources.
-- Auto mode prunes formats that can't beat the current best size.
-- Default pool size leaves headroom (`max(2, min(cores − 2, 8))`).
+- The quality search now stops climbing near the top of the quality range once a target is clearly out of reach. This removes the WebP-to-q100 balloon on already-compressed sources.
+- Auto mode skips formats that can't beat the current best size.
+- The default pool size leaves some headroom: `max(2, min(cores - 2, 8))`.
 
 ### Fixed
 
-- Uploading a large ZIP (e.g. 431 MB) failed — the whole upload was buffered in
-  memory and unzipped at once, which exhausted RAM.
+- Uploading a large ZIP (for example 431 MB) failed. The whole upload was buffered in memory and unzipped at once, which ran the process out of RAM.
 
-## [1.1.0] — ZIP in/out & parallel
+## [1.1.0] - ZIP in/out and parallel batches
 
 ### Added
 
-- **ZIP in → ZIP out** with the folder structure preserved, plus a
-  `manifest.json` and `REPORT.txt`. Originals are kept when a re-encode would
-  grow them.
-- **Worker-thread pool** — batches use every core instead of one.
-- "Download all as ZIP" for a batch of loose images.
+- ZIP in, ZIP out, with the folder structure preserved, plus a `manifest.json` and a `REPORT.txt`. Originals are kept when a re-encode would make them larger.
+- A worker-thread pool, so batches use every core instead of one.
+- Download all as ZIP for a batch of loose images.
 
 ### Changed
 
-- ~4× faster batches (119 s → 28 s for 8 photos, auto + balanced) via encoding
-  from raw pixels, a shared decoded source + metric reference across formats,
-  seeded search with early-exit, and AVIF effort 4 → 3.
+- Batches are about 4× faster (119 s to 28 s for 8 photos, auto + balanced), from encoding out of raw pixels, sharing one decoded source and metric reference across formats, seeding the search with an early exit, and dropping AVIF effort from 4 to 3.
 
-## [1.0.0] — Initial release
+## [1.0.0] - Initial release
 
 ### Added
 
-- Local-first image compressor: **keep visual quality** (smallest file under a
-  perceptual DSSIM ceiling) or **target a size** (fill a KB budget).
+- Local-first image compressor with two modes: keep visual quality (smallest file under a perceptual DSSIM ceiling) or target a size (fill a KB budget).
 - Formats: AVIF, WebP, JPEG, PNG, and optional JPEG XL (via `cjxl`).
-- Web UI with drag-and-drop and a before/after slider, a CLI, and a library API.
-- A hand-written multi-scale DSSIM metric in CIELAB, and a `calibrate` tool to
-  re-tune the thresholds for your own images.
+- A web UI with drag-and-drop and a before/after slider, a CLI, and a library API.
+- A hand-written multi-scale DSSIM metric in CIELAB, and a `calibrate` tool to re-tune the thresholds for your own images.
