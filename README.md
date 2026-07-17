@@ -107,6 +107,8 @@ Reading → Compressing (with a live count, running size saved, and an ETA) →
 Packaging → Ready — then a **Download ZIP** button. A batch of loose images gets
 **Download all as ZIP** as well as individual downloads.
 
+![ZIP compressed, all stages complete](docs/zip-ready.png)
+
 ### Big archives (hundreds of MB to multiple GB)
 
 Large ZIPs are handled without ever holding the archive in memory:

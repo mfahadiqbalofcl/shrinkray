@@ -1,9 +1,18 @@
 {
   "name": "shrinkray",
-  "version": "1.0.0",
-  "description": "Local-first image compressor. Target a file size in KB, or target visual quality and let it find the smallest file. AVIF, WebP, JPEG, PNG, JXL.",
+  "version": "1.2.0",
+  "description": "Local-first image compressor. Target a file size in KB, or target visual quality and let it find the smallest file. AVIF, WebP, JPEG, PNG, JXL. ZIP in/out, parallel, handles 1GB+ archives.",
   "type": "module",
   "license": "MIT",
+  "author": "Fahad Iqbal (@mfahadiqbalofcl)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mfahadiqbalofcl/shrinkray.git"
+  },
+  "homepage": "https://github.com/mfahadiqbalofcl/shrinkray#readme",
+  "bugs": {
+    "url": "https://github.com/mfahadiqbalofcl/shrinkray/issues"
+  },
   "bin": {
     "shrinkray": "./bin/shrinkray.js"
   },
@@ -39,6 +48,7 @@
     "bin",
     "src",
     "public",
+    "tools",
     "README.md",
     "LICENSE"
   ],
