@@ -10,30 +10,48 @@
  *                      fits the byte budget; if even minimum quality overshoots,
  *                      progressively downscale and try again.
  *
- * Both share one idea: encoding is monotonic in the quality knob (higher
- * quality => bigger file and lower DSSIM), so binary search converges in
- * ~log2(range) ≈ 7 steps. We cache encodes by quality so the two ends of the
- * search never re-encode the same point, and we keep the best candidate seen
- * rather than trusting the final probe to be optimal.
+ * Speed notes (why this is fast):
+ *  - The source is decoded to raw pixels ONCE. Every encode reads those raw
+ *    pixels directly — no PNG re-encode/re-decode per iteration.
+ *  - The metric reference is built ONCE from those same raw pixels.
+ *  - Callers (compressAuto) can pass a shared decoded source so N formats don't
+ *    each re-decode the original.
+ *  - The search is SEEDED near the likely answer and capped, so it converges in
+ *    ~4 encodes instead of ~8. Encoding is monotonic in quality (higher quality
+ *    => bigger file and lower DSSIM), which is what makes the search valid.
  */
 
+import sharp from 'sharp';
 import { prepareReference, compareToReference, QUALITY_TARGETS, visualScore } from './metric.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
 /**
- * Binary search over an integer quality range.
- * @param {(q:number)=>Promise<{buffer:Buffer, size:number, dssim?:number}>} probe
- * @param {(cand)=>boolean} satisfies  true if the candidate meets the constraint
- * @param {'higher-is-smaller'|'higher-is-bigger'} direction
- *   Which way "quality up" moves the thing we're bounding. For a size budget,
- *   quality up = bigger file, and when a probe *satisfies* (fits) we want to go
- *   higher. For a quality ceiling, quality up = lower DSSIM = satisfies, and we
- *   want to go lower to shrink the file. This flag encodes that asymmetry.
- * @param {[number,number]} range
+ * Seeds: where to start the quality search per format, so the first probe lands
+ * close and the bisect converges in a few steps. These are the equal-quality
+ * mappings from the codec literature (industrialempathy), turned into a
+ * starting guess per named fidelity target.
+ */
+const QUALITY_SEED = {
+  'visually-lossless': { avif: 88, webp: 92, jpeg: 92, png: 100, jxl: 90 },
+  high: { avif: 72, webp: 85, jpeg: 85, png: 90, jxl: 80 },
+  balanced: { avif: 55, webp: 78, jpeg: 78, png: 80, jxl: 72 },
+  small: { avif: 40, webp: 62, jpeg: 62, png: 60, jxl: 55 },
+  tiny: { avif: 28, webp: 45, jpeg: 45, png: 40, jxl: 40 },
+};
+
+/**
+ * Binary search over an integer quality range, seeded at `seed`.
+ *
+ * @param {(q:number)=>Promise<{buffer:Buffer,size:number,dssim?:number,dir:string}>} probe
+ * @param {(cand)=>boolean} satisfies  true if a candidate meets the constraint
+ * @param {(a,b)=>boolean} prefer  is candidate a "better" than best-so-far b
+ * @param {[number,number]} range  inclusive quality bounds
+ * @param {number} seed  first quality to probe
  * @param {number} maxIters
  */
-async function bisect(probe, satisfies, prefer, range, maxIters = 8) {
+async function bisect(probe, satisfies, prefer, range, seed, opts = {}) {
+  const { maxIters = 5, goodEnough } = opts;
   let [lo, hi] = range;
   let best = null;
   const seen = new Map();
@@ -46,30 +64,34 @@ async function bisect(probe, satisfies, prefer, range, maxIters = 8) {
     return cand;
   };
 
+  // First probe at the seed (not the midpoint) so a good guess pays off.
+  let next = clamp(seed ?? Math.floor((lo + hi) / 2), lo, hi);
   let iters = 0;
   while (lo <= hi && iters < maxIters) {
     iters++;
-    const mid = Math.floor((lo + hi) / 2);
-    const cand = await at(mid);
+    const cand = await at(next);
     const ok = satisfies(cand);
+    if (ok && (!best || prefer(cand, best))) best = cand;
 
-    if (ok) {
-      // `prefer` decides which satisfying candidate is "better": smaller file
-      // (quality search) or bigger-but-still-fitting file (size search).
-      if (!best || prefer(cand, best)) best = cand;
-    }
+    // Stop as soon as a satisfying candidate is already near-optimal — one more
+    // encode+metric wouldn't buy a meaningfully better result. This is what
+    // turns a good seed into a 2-3 probe search instead of a full 5.
+    if (ok && goodEnough?.(cand)) break;
 
-    // Move toward the boundary. If satisfied and we prefer smaller output, or
-    // not satisfied and we need higher quality, the direction depends on how
-    // quality relates to the constraint — captured by whether `ok` holds.
-    if (cand.dir === 'down' ? ok : !ok) {
-      hi = mid - 1;
-    } else {
-      lo = mid + 1;
-    }
+    // 'down': quality up lowers DSSIM (satisfies) — a satisfying probe means we
+    // can try LOWER quality (smaller file). 'up': quality up grows the file —
+    // a fitting probe means we can try HIGHER quality.
+    if (cand.dir === 'down' ? ok : !ok) hi = cand.quality - 1;
+    else lo = cand.quality + 1;
+
+    next = Math.floor((lo + hi) / 2);
   }
   return { best, evaluated: [...seen.values()], iterations: iters };
 }
+
+// ---------------------------------------------------------------------------
+// Quality-target search
+// ---------------------------------------------------------------------------
 
 /**
  * Compress for the smallest file that stays visually within `target`.
@@ -77,23 +99,24 @@ async function bisect(probe, satisfies, prefer, range, maxIters = 8) {
  * @param {Buffer} input  original image bytes
  * @param {import('./formats.js').FormatDef} format
  * @param {Object} opts
- * @param {string|number} opts.target  named target ('visually-lossless'…) or a raw DSSIM ceiling
+ * @param {string|number} opts.target  named target or a raw DSSIM ceiling
  * @param {number} [opts.effort]
  * @param {number} [opts.maxEdge]  downscale longest edge before encoding
  * @param {string} [opts.background]  flatten colour for alpha->opaque formats
+ * @param {object} [opts.source]  shared pre-decoded source (see decodeSource)
  */
 export async function searchByQuality(input, format, opts = {}) {
-  const ceiling =
-    typeof opts.target === 'number' ? opts.target : QUALITY_TARGETS[opts.target ?? 'high'];
+  const targetName = typeof opts.target === 'number' ? null : opts.target ?? 'high';
+  const ceiling = typeof opts.target === 'number' ? opts.target : QUALITY_TARGETS[targetName];
   if (ceiling === undefined) throw new Error(`Unknown quality target: ${opts.target}`);
 
   const prepared = await preprocess(input, format, opts);
-  const reference = await prepareReference(prepared.referencePng);
+  const reference = prepared.reference;
 
   // Lossless short-circuit: no search, just encode once.
   if (ceiling === 0) {
     if (!format.canLossless) throw new Error(`${format.label} cannot encode losslessly`);
-    const buffer = await format.encode(prepared.pipelineInput, {
+    const buffer = await format.encode(prepared.raw, {
       quality: 100,
       effort: opts.effort ?? format.defaultEffort,
       lossless: true,
@@ -103,174 +126,190 @@ export async function searchByQuality(input, format, opts = {}) {
 
   const finalEffort = opts.effort ?? format.defaultEffort;
   const searchEffort = Math.min(finalEffort, format.searchEffort ?? finalEffort);
+  const seed = (targetName && QUALITY_SEED[targetName]?.[format.id]) ?? 70;
 
   const probe = async (quality) => {
-    const buffer = await format.encode(prepared.pipelineInput, { quality, effort: searchEffort });
+    const buffer = await format.encode(prepared.raw, { quality, effort: searchEffort });
     const dssim = await compareToReference(reference, buffer);
     return { quality, buffer, size: buffer.length, dssim, dir: 'down' };
   };
 
-  // Satisfy = within the perceptual ceiling. Among satisfying candidates we
-  // prefer the smallest file. Direction 'down': when a candidate satisfies we
-  // push quality lower to try to shrink further.
   const { best, evaluated } = await bisect(
     probe,
     (c) => c.dssim <= ceiling,
     (a, b) => a.size < b.size,
-    format.qualityRange
+    format.qualityRange,
+    seed,
+    // "Near-optimal" = within the ceiling but close to it: lowering quality
+    // further would breach it, so this is about the smallest safe file.
+    { goodEnough: (c) => c.dssim >= ceiling * 0.75 }
   );
 
-  // If nothing hit the ceiling (rare — e.g. a noisy source at a strict target),
-  // fall back to the highest-quality probe we took, so we still return something.
-  const chosen =
-    best ??
-    evaluated.reduce((a, b) => (a.dssim <= b.dssim ? a : b));
+  // If nothing hit the ceiling (e.g. a noisy source at a strict target), fall
+  // back to the lowest-DSSIM probe so we still return the best available.
+  const chosen = best ?? evaluated.reduce((a, b) => (a.dssim <= b.dssim ? a : b));
 
-  // Re-encode the winning quality once at full effort. Higher effort only
-  // shrinks the file and never raises DSSIM, so the perceptual guarantee holds.
-  const final = await finalEncode(format, prepared.pipelineInput, chosen, finalEffort, searchEffort, reference);
+  // Re-encode the winner once at full effort. Higher effort only shrinks the
+  // file and never raises DSSIM, so the perceptual guarantee holds.
+  const final = await finalEncode(format, prepared.raw, chosen, finalEffort, searchEffort, reference);
   const result = finalize(final.buffer, final.dssim, prepared, input, `q${chosen.quality}`);
-
-  // Report honestly whether we actually reached the fidelity target. Some
-  // formats (notably WebP/JPEG at a strict "visually-lossless" ceiling) top out
-  // at q100 without meeting it; the UI uses this to suggest AVIF instead.
   result.targetMet = final.dssim <= ceiling;
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Size-budget search
+// ---------------------------------------------------------------------------
+
 /**
  * Compress to fit within `targetBytes`. Quality-first; downscale only if the
- * byte budget can't be met at the format's minimum quality.
+ * budget can't be met at the format's minimum quality.
  *
  * @param {number} opts.targetBytes  hard ceiling in bytes
- * @param {number} [opts.tolerance]  accept files within this fraction under target (default 0.06)
  */
 export async function searchBySize(input, format, opts = {}) {
   const targetBytes = opts.targetBytes;
   if (!targetBytes || targetBytes <= 0) throw new Error('targetBytes must be positive');
-  // Size mode searches at the FINAL effort, unlike quality mode. A cheaper
-  // search effort would find a quality that fits the budget at that effort, but
-  // the final higher-effort encode is smaller — so we'd sail well under budget
-  // at needlessly low quality (mozjpeg alone shrinks JPEG ~30%). Here the goal
-  // is to fill the budget, so we must measure at the effort we ship. No
-  // per-probe DSSIM is computed in this mode, so the encodes are the only cost.
+  // Size mode searches at the FINAL effort (higher effort => smaller file), so
+  // that we measure at the effort we ship and actually fill the budget rather
+  // than sailing under it. No per-probe DSSIM here — encodes are the only cost.
   const finalEffort = opts.effort ?? format.defaultEffort;
 
   let prepared = await preprocess(input, format, opts);
-  let reference = await prepareReference(prepared.referencePng);
 
-  // Up to 4 downscale rounds: full, then 85%/72%/61% of the longest edge.
-  // Geometric so each round meaningfully cuts pixels (and therefore floor size).
+  // Geometric downscale rounds: full, then 85% / 72% / 61% of the longest edge.
   const scales = [1, 0.85, 0.72, 0.61];
   let last = null;
 
   for (let round = 0; round < scales.length; round++) {
     if (round > 0) {
-      const factor = scales[round];
       prepared = await preprocess(input, format, {
         ...opts,
-        maxEdge: Math.round(prepared.baseLongestEdge * factor),
+        source: undefined, // re-decode at the smaller size
+        maxEdge: Math.round(prepared.baseLongestEdge * scales[round]),
       });
-      reference = await prepareReference(prepared.referencePng);
     }
 
     const probe = async (quality) => {
-      const buffer = await format.encode(prepared.pipelineInput, { quality, effort: finalEffort });
+      const buffer = await format.encode(prepared.raw, { quality, effort: finalEffort });
       return { quality, buffer, size: buffer.length, dir: 'up' };
     };
 
-    // Satisfy = fits the budget. Among fitting candidates prefer the LARGEST
-    // (best quality that still fits). Direction 'up': a fitting candidate lets
-    // us push quality higher.
+    // Seed from a bytes-per-pixel estimate: assume file size scales roughly with
+    // quality, start near where the budget likely lands. 55 is a decent middle.
     const { best, evaluated } = await bisect(
       probe,
       (c) => c.size <= targetBytes,
       (a, b) => a.size > b.size,
-      format.qualityRange
+      format.qualityRange,
+      55,
+      // Filling 92%+ of the budget is a great result — stop hunting for the last
+      // few bytes of a KB target that no one will notice.
+      { goodEnough: (c) => c.size >= targetBytes * 0.92 }
     );
 
     if (best) {
-      const dssim = await compareToReference(reference, best.buffer);
+      const dssim = await compareToReference(prepared.reference, best.buffer);
       const scaledNote = round === 0 ? `q${best.quality}` : `q${best.quality} @${Math.round(scales[round] * 100)}%`;
       return finalize(best.buffer, dssim, prepared, input, scaledNote);
     }
 
-    // Nothing fit even at min quality. Remember the smallest attempt for the
-    // "impossible target" fallback, then downscale and retry.
     const smallest = evaluated.reduce((a, b) => (a.size <= b.size ? a : b));
     if (!last || smallest.size < last.buffer.length) {
-      last = { buffer: smallest.buffer, prepared, reference, quality: smallest.quality, scale: scales[round] };
+      last = { buffer: smallest.buffer, prepared, quality: smallest.quality, scale: scales[round] };
     }
   }
 
-  // Even the most aggressive downscale + min quality overshot the budget.
-  // Return the smallest thing we produced and let the caller report honestly.
-  const dssim = await compareToReference(last.reference, last.buffer);
+  // Even the smallest downscale + min quality overshot. Return the smallest and
+  // report honestly that the target was not reachable.
+  const dssim = await compareToReference(last.prepared.reference, last.buffer);
   const result = finalize(last.buffer, dssim, last.prepared, input, `q${last.quality} @${Math.round(last.scale * 100)}% (target not reachable)`);
   result.targetMet = false;
   return result;
 }
 
 // ---------------------------------------------------------------------------
-// Shared pre/post processing
+// Shared decode / pre / post processing
 // ---------------------------------------------------------------------------
 
-import sharp from 'sharp';
-
 /**
- * Re-encode the winning quality at full effort. During search we encode at a
- * cheaper effort (see format.searchEffort) because higher effort costs a lot of
- * time while only shrinking the file, not changing which quality value we'd
- * pick. This is where we pay for that final size win — once, on the winner.
+ * Decode the source ONCE into oriented raw pixels. compressAuto calls this and
+ * hands the result to every format via opts.source, so a 5-format comparison
+ * decodes the original a single time instead of five.
  *
- * If search already ran at the final effort (searchEffort === finalEffort), we
- * reuse the buffer we have and skip a redundant encode.
+ * @returns {Promise<{data:Buffer,width:number,height:number,channels:number,baseLongestEdge:number,hasAlpha:boolean}>}
  */
-async function finalEncode(format, pipelineInput, chosen, finalEffort, searchEffort, reference) {
-  if (finalEffort === searchEffort) {
-    const dssim = chosen.dssim ?? (await compareToReference(reference, chosen.buffer));
-    return { buffer: chosen.buffer, dssim };
-  }
-  const buffer = await format.encode(pipelineInput, { quality: chosen.quality, effort: finalEffort });
-  const dssim = await compareToReference(reference, buffer);
-  return { buffer, dssim };
-}
-
-/**
- * Normalise orientation, optionally downscale, flatten alpha for opaque-only
- * formats, and produce both the pipeline input (fed to the encoder) and a
- * lossless PNG reference (fed to the metric) at the SAME pixel dimensions —
- * so DSSIM measures codec loss, not a resize we did to the reference.
- */
-async function preprocess(input, format, opts) {
+export async function decodeSource(input, opts = {}) {
   let img = sharp(input, { failOn: 'none' }).rotate(); // bake EXIF orientation
   const meta = await img.metadata();
-  const baseLongestEdge = Math.max(meta.width, meta.height);
+  const baseLongestEdge = Math.max(meta.width || 1, meta.height || 1);
 
   if (opts.maxEdge && opts.maxEdge < baseLongestEdge) {
     img = img.resize(opts.maxEdge, opts.maxEdge, { fit: 'inside', withoutEnlargement: true, kernel: 'lanczos3' });
   }
 
-  if (!format.alpha) {
-    img = img.flatten({ background: opts.background || '#ffffff' });
-  }
-
-  // Materialise once as raw pixels so encoder and metric share identical input.
   const { data, info } = await img.raw().toBuffer({ resolveWithObject: true });
-  const pipelineInput = await sharp(data, {
-    raw: { width: info.width, height: info.height, channels: info.channels },
-  })
-    .png()
-    .toBuffer();
-
   return {
-    pipelineInput, // PNG carrying the exact pixels to encode
-    referencePng: pipelineInput, // same bytes; the metric decodes it as ground truth
+    data,
     width: info.width,
     height: info.height,
+    channels: info.channels,
     baseLongestEdge,
+    hasAlpha: info.channels === 4 || info.channels === 2,
+  };
+}
+
+/**
+ * Turn a decoded source into the exact raw pixels this format will encode
+ * (flattening alpha for opaque-only formats) plus the metric reference built
+ * from those same pixels. Both come from raw memory — no image re-encode.
+ */
+async function preprocess(input, format, opts) {
+  let src = opts.source;
+  // Re-decode when there's no shared source, or when this call needs a smaller
+  // image than the shared source currently holds (size mode's downscale rounds).
+  if (!src || (opts.maxEdge && opts.maxEdge < Math.max(src.width, src.height))) {
+    src = await decodeSource(input, opts);
+  }
+
+  let raw = { data: src.data, width: src.width, height: src.height, channels: src.channels };
+
+  // Flatten alpha for formats that can't hold it (JPEG). Do it in raw space.
+  if (!format.alpha && src.hasAlpha) {
+    const flat = await sharp(src.data, { raw: { width: src.width, height: src.height, channels: src.channels } })
+      .flatten({ background: opts.background || '#ffffff' })
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    raw = { data: flat.data, width: flat.info.width, height: flat.info.height, channels: flat.info.channels };
+  }
+
+  const reference = await prepareReference(raw);
+
+  return {
+    raw, // { data, width, height, channels } — fed straight to the encoder
+    reference, // CIELAB planes for the metric
+    width: raw.width,
+    height: raw.height,
+    baseLongestEdge: src.baseLongestEdge,
     originalSize: input.length,
   };
+}
+
+/**
+ * Re-encode the winning quality at full effort. Search runs at a cheaper effort
+ * (format.searchEffort) because higher effort mostly costs time while only
+ * shrinking the file, not changing which quality we'd pick. We pay for the size
+ * win once, here, on the winner. If search already ran at the final effort, the
+ * existing buffer is reused.
+ */
+async function finalEncode(format, raw, chosen, finalEffort, searchEffort, reference) {
+  if (finalEffort === searchEffort) {
+    const dssim = chosen.dssim ?? (await compareToReference(reference, chosen.buffer));
+    return { buffer: chosen.buffer, dssim };
+  }
+  const buffer = await format.encode(raw, { quality: chosen.quality, effort: finalEffort });
+  const dssim = await compareToReference(reference, buffer);
+  return { buffer, dssim };
 }
 
 function finalize(buffer, dssim, prepared, originalInput, note) {
@@ -284,10 +323,9 @@ function finalize(buffer, dssim, prepared, originalInput, note) {
     originalSize: originalInput.length,
     ratio: buffer.length / originalInput.length,
     savedBytes: originalInput.length - buffer.length,
-    // Re-encoding an already-optimised source (often an existing JPEG/WebP) to a
-    // strict fidelity target can produce a file BIGGER than the input. That's a
-    // real outcome, not a bug — but a compressor must never quietly hand back a
-    // larger file, so we flag it and let the caller offer to keep the original.
+    // Re-encoding an already-optimised source to a strict target can produce a
+    // file BIGGER than the input. Real outcome, not a bug — but never hand back
+    // a larger file silently, so flag it for the caller to offer keeping originals.
     grewLargerThanSource: buffer.length >= originalInput.length,
     note,
     targetMet: true,

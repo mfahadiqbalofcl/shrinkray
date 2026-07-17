@@ -21,6 +21,22 @@ import { join } from 'node:path';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Build a sharp instance from either an encoded Buffer or a raw-pixel descriptor
+ * `{ data, width, height, channels }`. The raw path is what the search uses on
+ * every iteration — it skips re-decoding a PNG each time, which is one of the
+ * biggest per-encode savings.
+ */
+function fromSource(source) {
+  if (Buffer.isBuffer(source) || source instanceof Uint8Array) {
+    return sharp(source, { failOn: 'none' });
+  }
+  return sharp(source.data, {
+    failOn: 'none',
+    raw: { width: source.width, height: source.height, channels: source.channels },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Optional CLI encoder detection (cached for the process lifetime)
 // ---------------------------------------------------------------------------
@@ -85,12 +101,15 @@ export const FORMATS = {
     alpha: true,
     canLossless: true,
     qualityRange: [1, 100],
-    defaultEffort: 4, // libaom speed; higher = slower/smaller. 4 is the sane middle.
-    searchEffort: 2, // ~4x faster per probe; final encode uses defaultEffort
+    // libaom speed 0-9 (higher = slower/smaller). 3 is the value that matters:
+    // measured, effort 4 is 3x slower than 3 for only ~3% smaller files, and
+    // effort 5 barely moves the needle. 3 is the production sweet spot.
+    defaultEffort: 3,
+    searchEffort: 2, // faster still per probe; final encode uses defaultEffort
     effortRange: [0, 9],
     available: async () => true, // built into sharp/libvips
     async encode(input, { quality, effort = 4, lossless = false, chromaSubsampling }) {
-      return sharp(input)
+      return fromSource(input)
         .avif({
           quality,
           effort,
@@ -114,7 +133,7 @@ export const FORMATS = {
     effortRange: [0, 6],
     available: async () => true,
     async encode(input, { quality, effort = 4, lossless = false }) {
-      return sharp(input)
+      return fromSource(input)
         .webp({ quality, effort, lossless, smartSubsample: true })
         .toBuffer();
     },
@@ -133,7 +152,7 @@ export const FORMATS = {
     effortRange: [0, 1],
     available: async () => true,
     async encode(input, { quality, effort = 1 }) {
-      return sharp(input)
+      return fromSource(input)
         .jpeg({
           quality,
           mozjpeg: effort >= 1, // trellis quant + optimised Huffman: smaller, slower
@@ -159,7 +178,7 @@ export const FORMATS = {
     async encode(input, { quality, effort = 7, lossless = false }) {
       // quality 100 (or lossless) => true lossless deflate; below => palette-quantised.
       const palette = !lossless && quality < 100;
-      return sharp(input)
+      return fromSource(input)
         .png({
           compressionLevel: 9,
           effort,
@@ -186,7 +205,7 @@ export const FORMATS = {
     async encode(input, { quality, effort = 7, lossless = false }) {
       // sharp/libvips prebuilt binaries ship without libjxl, so we shell out to
       // the reference `cjxl`. Feed it a PNG so it never has to guess the input.
-      const png = await sharp(input).png().toBuffer();
+      const png = await fromSource(input).png().toBuffer();
       return encodeViaCli(
         'cjxl',
         (inPath, outPath) => {

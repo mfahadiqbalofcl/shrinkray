@@ -120,21 +120,19 @@ function bindDropzone() {
   });
 }
 
+const isZipFile = (f) => /\.zip$/i.test(f.name) || f.type === 'application/zip' || f.type === 'application/x-zip-compressed';
+
 async function handleFiles(files) {
-  for (const file of files) {
-    const card = renderPending(file.name);
-    try {
-      const result = await compressOne(file);
-      const entry = result.results[0];
-      if (!entry.ok) throw new Error(entry.error || 'Compression failed');
-      renderResult(card, file, entry);
-    } catch (err) {
-      renderError(card, file.name, err.message);
-    }
-  }
+  const zips = files.filter(isZipFile);
+  const images = files.filter((f) => !isZipFile(f));
+
+  // A dropped ZIP is a batch of its own; images are compressed together.
+  for (const zip of zips) await compressBatch([zip], { zip: true });
+  if (images.length) await compressBatch(images, { zip: false });
 }
 
-function compressOne(file) {
+/** Build the multipart form for a compress request. */
+function buildForm(files) {
   const fd = new FormData();
   fd.append('mode', state.mode);
   fd.append('format', state.format);
@@ -142,11 +140,123 @@ function compressOne(file) {
   else fd.append('targetKB', String(state.targetKB));
   fd.append('effort', String(state.effort));
   if (state.maxEdge) fd.append('maxEdge', String(state.maxEdge));
-  fd.append('image', file, file.name);
-  return fetch('/api/compress', { method: 'POST', body: fd }).then((r) => {
-    if (!r.ok) return r.json().then((j) => { throw new Error(j.error || `Server error ${r.status}`); });
-    return r.json();
-  });
+  for (const f of files) fd.append('image', f, f.name);
+  return fd;
+}
+
+/**
+ * POST files and consume the server's NDJSON progress stream. Loose images get
+ * a result card each as they finish; a ZIP gets the batch panel + a download.
+ */
+async function compressBatch(files, { zip }) {
+  // Keep object URLs so result cards can show the "before" image.
+  const originals = new Map(files.map((f) => [f.name, f]));
+
+  const res = await fetch('/api/compress', { method: 'POST', body: buildForm(files) });
+  if (!res.ok || !res.body) {
+    const msg = await res.json().catch(() => ({}));
+    throw new Error(msg.error || `Server error ${res.status}`);
+  }
+
+  const cards = new Map(); // name -> pending card element (loose mode)
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) handleEvent(JSON.parse(line), { zip, originals, cards });
+    }
+  }
+}
+
+function handleEvent(ev, ctx) {
+  switch (ev.type) {
+    case 'start':
+      if (ctx.zip || ev.total > 1) showBatch(ev);
+      break;
+    case 'result': // loose image finished
+      if (ev.ok) {
+        const file = ctx.originals.get(ev.name);
+        renderResult(renderPending(ev.name), file, { name: ev.name, best: ev.best });
+      } else {
+        renderError(renderPending(ev.name), ev.name, ev.error);
+      }
+      bumpBatchLoose(ctx.originals.size);
+      break;
+    case 'progress': // zip image finished (no preview)
+      updateBatch(ev);
+      break;
+    case 'done':
+      finishBatch(ev, ctx);
+      break;
+    case 'error':
+      failBatch(ev.error);
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Batch panel (ZIPs and multi-image runs)
+// ---------------------------------------------------------------------------
+
+const batchEl = $('#batch');
+let batchDone = 0;
+
+function showBatch(ev) {
+  batchDone = 0;
+  batchEl.classList.remove('hidden');
+  $('#batchTitle').textContent = ev.isZip ? 'Compressing ZIP…' : `Compressing ${ev.total} images…`;
+  $('#batchCount').textContent = `0 / ${ev.total}`;
+  $('#batchBar').style.width = '0%';
+  $('#batchFoot').textContent = ev.skipped ? `${ev.skipped} non-image file(s) will be skipped` : '';
+  const dl = $('#batchDownload');
+  dl.classList.add('hidden');
+  dl.removeAttribute('href');
+}
+
+function updateBatch(ev) {
+  batchDone = ev.done;
+  $('#batchCount').textContent = `${ev.done} / ${ev.total}`;
+  $('#batchBar').style.width = `${Math.round((ev.done / ev.total) * 100)}%`;
+}
+
+function bumpBatchLoose(total) {
+  if (batchEl.classList.contains('hidden')) return;
+  batchDone++;
+  $('#batchCount').textContent = `${batchDone} / ${total}`;
+  $('#batchBar').style.width = `${Math.round((batchDone / total) * 100)}%`;
+}
+
+function finishBatch(ev, ctx) {
+  if (batchEl.classList.contains('hidden')) return; // single image, no panel
+  const s = ev.stats || {};
+  $('#batchBar').style.width = '100%';
+  $('#batchTitle').textContent = ctx.zip ? 'ZIP compressed' : 'Done';
+  $('#batchCount').textContent = `${s.compressed} / ${s.images}`;
+  const saved = s.percentSaved ?? 0;
+  $('#batchFoot').innerHTML =
+    `${fmtSize(s.totalIn)} → <span class="big">${fmtSize(s.totalOut)}</span> · ${saved}% smaller` +
+    (s.failed ? ` · ${s.failed} failed` : '') +
+    (s.skipped ? ` · ${s.skipped} skipped` : '');
+  const dl = $('#batchDownload');
+  if (ev.downloadId) {
+    dl.href = `/api/download/${ev.downloadId}`;
+    dl.textContent = ctx.zip ? '↓ Download ZIP' : '↓ Download all as ZIP';
+    dl.classList.remove('hidden');
+  }
+}
+
+function failBatch(message) {
+  if (batchEl.classList.contains('hidden')) return;
+  $('#batchTitle').textContent = 'Failed';
+  $('#batchFoot').textContent = message;
 }
 
 // ---------------------------------------------------------------------------
@@ -172,8 +282,9 @@ function renderResult(pendingCard, file, entry) {
   const el = (role) => tpl.querySelector(`[data-role="${role}"]`);
   const best = entry.best;
 
-  const originalUrl = URL.createObjectURL(file);
-  el('before').src = originalUrl;
+  // The "before" image is the local file (loose uploads). ZIP-sourced results
+  // have no local File, so fall back to comparing against the compressed image.
+  el('before').src = file ? URL.createObjectURL(file) : best.dataUrl;
   el('after').src = best.dataUrl;
 
   el('name').textContent = entry.name;

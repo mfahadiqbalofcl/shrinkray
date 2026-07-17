@@ -2,13 +2,15 @@
 
 **A local-first image compressor you run yourself. Unlimited, free, private, open source.**
 
-Drop in a JPEG/PNG/WebP/AVIF/TIFF/GIF and get back the smallest possible AVIF, WebP, JPEG, PNG (or JXL) — either **kept visually identical** or **squeezed to fit an exact KB budget**. Nothing is uploaded; every byte is processed on your machine by [sharp](https://sharp.pixelplumbing.com/) (libvips). No accounts, no limits, no "upgrade to Pro."
+Drop in a JPEG/PNG/WebP/AVIF/TIFF/GIF — or a whole **`.zip` of them** — and get back the smallest possible AVIF, WebP, JPEG, PNG (or JXL), either **kept visually identical** or **squeezed to fit an exact KB budget**. Nothing is uploaded; every byte is processed on your machine by [sharp](https://sharp.pixelplumbing.com/) (libvips), in parallel across all your CPU cores. No accounts, no limits, no "upgrade to Pro."
 
-It solves the two problems that make online compressors annoying:
+It solves the three problems that make online compressors annoying:
 
 1. **"Compress without losing quality."** ShrinkRay doesn't guess a quality number. It measures the *perceptual* difference between the original and each candidate encode ([DSSIM](#how-it-works), the metric behind JPEG XL/Guetzli) and finds the **smallest file that stays under a visible-difference threshold**. You pick the threshold in plain words ("visually lossless", "balanced"), not a magic 0–100 dial.
 
 2. **"Make it exactly N kilobytes."** Tell it `--size 100kb` and it binary-searches the quality to *fill* that budget at the best possible quality, then downscales only if the target genuinely can't be met — and tells you honestly when it can't.
+
+3. **"Do a whole folder at once."** Drop a **ZIP in and get a ZIP back** with the exact same folder structure, every image compressed, plus a `manifest.json` and `REPORT.txt`. Loose images can be grabbed individually or as one "Download all as ZIP." Everything runs on a [worker pool](#performance) so a batch uses every core, not one.
 
 ![ShrinkRay UI](docs/screenshot.png)
 
@@ -19,7 +21,7 @@ It solves the two problems that make online compressors annoying:
 Requires **Node 18+**. From the project folder:
 
 ```bash
-npm install          # installs sharp (the only dependency)
+npm install          # installs sharp (image codecs) + fflate (fast ZIP)
 npm start            # launches the web UI at http://127.0.0.1:4747
 ```
 
@@ -34,8 +36,11 @@ node bin/shrinkray.js hero.jpg --target visually-lossless
 # Fit under 100 KB
 node bin/shrinkray.js hero.jpg --size 100kb
 
-# Batch a whole folder to WebP under 80 KB each, into out/
+# Batch a whole folder to WebP under 80 KB each, into out/ (runs in parallel)
 node bin/shrinkray.js images/*.png --size 80kb --format webp -o out/
+
+# A ZIP in -> a ZIP out, folder structure preserved
+node bin/shrinkray.js photos.zip --target balanced
 
 # Launch the web UI
 node bin/shrinkray.js serve
@@ -77,6 +82,66 @@ specific format.
 
 ---
 
+## ZIP in, ZIP out
+
+Drop a `.zip` (in the browser or with the CLI) and ShrinkRay:
+
+- reads every image inside, at any nesting depth;
+- compresses them all **in parallel** with your chosen mode and format;
+- writes a new ZIP with the **identical folder structure**, each image at its
+  original path with a new extension (`photos/hero.png` → `photos/hero.avif`);
+- adds a `manifest.json` (machine-readable per-file results) and a `REPORT.txt`
+  (human-readable summary);
+- **never ships a file bigger than it came in** — if an already-optimised image
+  would grow, the original is kept at its original path instead;
+- skips non-image files (and junk like `__MACOSX/`, dotfiles) and lists what it
+  skipped.
+
+```bash
+shrinkray photos.zip --target balanced            # -> photos-compressed.zip
+shrinkray photos.zip --size 200kb -o out.zip      # every image under 200 KB
+```
+
+In the web UI, a dropped ZIP shows a live progress bar and a **Download ZIP**
+button; a batch of loose images gets **Download all as ZIP** as well as
+individual downloads.
+
+---
+
+## Performance
+
+An earlier version compressed images one at a time on a single core. This one is
+built for batches:
+
+| Workload (8 photos, 4-core Mac) | Before | After | Speedup |
+|---|---:|---:|---:|
+| Auto format, "balanced" fidelity | 119 s | 28 s | **4.2×** |
+| WebP, fit-100 KB | 14 s | 5.5 s | **2.6×** |
+| Single photo, auto + balanced | 19 s | 9 s | **2.1×** |
+
+The wins come from doing less work and doing it on every core at once:
+
+- **Worker-thread pool.** The perceptual metric is CPU-bound JavaScript that
+  would pin one core and serialize a batch. A pool of workers (one per core)
+  compresses N images at once. sharp is pinned to one libvips thread per worker
+  so N images in flight saturate N cores instead of fighting over threads.
+- **Decode once, encode from raw.** The source is decoded to raw pixels a single
+  time; every trial encode reads those pixels directly — no PNG re-encode/decode
+  per iteration, and "Auto" decodes the original once for all formats, not once
+  per format.
+- **Seeded, early-exiting search.** The quality search starts from a per-target
+  seed (from the codec equal-quality literature) and stops as soon as a result
+  is near-optimal — ~3 encodes instead of ~8.
+- **Right-sized effort.** AVIF final-encodes at libaom effort 3, which measured
+  ~3× faster than effort 4 for ~3% larger files — the actual sweet spot.
+- **Native everywhere it counts.** libvips (C) does the pixel work and fflate
+  (fast, tiny) does the ZIP work; there's no slow pure-JS codec in the hot path.
+
+Nothing here trades away the perceptual guarantee — the final encode is always
+verified against the DSSIM ceiling.
+
+---
+
 ## How it works
 
 The interesting part is *"without losing quality."* Most tools just let you pick
@@ -89,11 +154,12 @@ a quality number and hope. ShrinkRay closes the loop:
 3. **Score it** with a multi-scale, DSSIM-style SSIM in CIELAB — the same family
    of metric that guides JPEG XL and Guetzli. It catches both fine ringing and
    coarse blotching, and unlike PSNR it correlates with human judgement.
-4. **Binary-search** the quality knob. Encoding is monotonic — higher quality
-   means a bigger file *and* a lower DSSIM — so ~7 probes converge on the
-   optimum. To stay fast, the search encodes at a cheap "effort", then does a
-   single final encode of the winner at full effort (higher effort only shrinks
-   the file, so the perceptual guarantee still holds).
+4. **Binary-search** the quality knob, seeded near the answer and stopping once
+   the result is near-optimal — usually 3–4 probes. Encoding is monotonic
+   (higher quality means a bigger file *and* a lower DSSIM), which is what makes
+   the search valid. To stay fast, the search encodes at a cheap "effort", then
+   does a single final encode of the winner at full effort (higher effort only
+   shrinks the file, so the perceptual guarantee still holds).
 
 The DSSIM thresholds are honest judgement calls, calibrated on a mixed
 photo/illustration/screenshot corpus. Re-tune them for your own content:
@@ -142,8 +208,9 @@ Every result carries real measured numbers: `size`, `dssim`, a 0–100 `score`,
 
 - **Local-first.** No network calls. The server binds to `127.0.0.1` and streams
   results from memory — nothing is written to disk or sent anywhere.
-- **Near-zero dependencies.** Just `sharp`. The HTTP server, multipart parser,
-  metric, and UI are hand-written and auditable.
+- **Two dependencies.** `sharp` (native image codecs) and `fflate` (ZIP). The
+  HTTP server, streaming multipart parser, worker pool, perceptual metric, and
+  UI are all hand-written and auditable — no framework.
 - **Honest output.** It never hands back a larger file, a missed target, or a
   guessed quality without saying so.
 

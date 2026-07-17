@@ -11,7 +11,7 @@
  */
 
 import { getFormat, availableFormats } from './formats.js';
-import { searchByQuality, searchBySize } from './search.js';
+import { searchByQuality, searchBySize, decodeSource } from './search.js';
 import { QUALITY_TARGETS } from './metric.js';
 
 export { availableFormats, QUALITY_TARGETS };
@@ -46,6 +46,7 @@ export async function compress(input, options) {
     effort: options.effort,
     maxEdge: options.maxEdge,
     background: options.background,
+    source: options.source, // shared pre-decoded pixels (compressAuto passes this)
   };
 
   let result;
@@ -78,15 +79,17 @@ export async function compressAuto(input, options, onProgress) {
     ? options.formats
     : (await availableFormats()).map((f) => f.id).filter((id) => id !== 'png');
 
+  // Decode the original ONCE and share the raw pixels with every format, so a
+  // 3-5 way comparison doesn't re-decode (and re-orient) the source each time.
+  const source = await decodeSource(input, { maxEdge: options.maxEdge });
+
   const candidates = [];
   for (const id of wanted) {
     const fmt = getFormat(id);
     if (!(await fmt.available())) continue;
-    // JPEG can't hold transparency; skip it in auto mode when the source has alpha,
-    // rather than silently flattening and calling it a win.
     onProgress?.({ format: id, phase: 'start' });
     try {
-      const r = await compress(input, { ...options, format: id });
+      const r = await compress(input, { ...options, format: id, source });
       candidates.push(r);
       onProgress?.({ format: id, phase: 'done' });
     } catch (err) {

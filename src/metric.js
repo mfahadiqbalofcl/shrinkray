@@ -200,18 +200,35 @@ function downsample2x(src, w, h) {
  * artifacts that matter survive a downscale, and this keeps a binary search
  * (8-ish encodes, each scored) inside a second or two rather than a minute.
  */
-export const METRIC_MAX_EDGE = 768;
+export const METRIC_MAX_EDGE = 640;
 
 const SCALE_WEIGHTS = [0.5, 0.3, 0.2]; // fine -> coarse
 const CHANNEL_WEIGHTS = { L: 0.8, A: 0.1, B: 0.1 };
 
 /**
- * Decode an image into the planar CIELAB form the metric consumes, downscaled
- * to a common comparison size. Hoisted out of `compare` so a binary search can
- * prepare the reference exactly once instead of per iteration.
+ * Wrap a source as a sharp instance. Accepts an encoded Buffer OR a raw-pixel
+ * descriptor `{ data, width, height, channels }`. The raw path is the fast one:
+ * the search already holds decoded pixels, so the reference is built without a
+ * pointless PNG encode/decode round-trip.
  */
-export async function prepareReference(buffer, maxEdge = METRIC_MAX_EDGE) {
-  const img = sharp(buffer, { failOn: 'none' }).flatten({ background: '#ffffff' });
+function asSharp(source) {
+  if (Buffer.isBuffer(source) || source instanceof Uint8Array) {
+    return sharp(source, { failOn: 'none' });
+  }
+  return sharp(source.data, {
+    failOn: 'none',
+    raw: { width: source.width, height: source.height, channels: source.channels },
+  });
+}
+
+/**
+ * Decode/resize a source into the planar CIELAB form the metric consumes.
+ * Hoisted out of `compare` so a binary search prepares the reference exactly
+ * once instead of per iteration.
+ * @param {Buffer|{data:Buffer,width:number,height:number,channels:number}} source
+ */
+export async function prepareReference(source, maxEdge = METRIC_MAX_EDGE) {
+  const img = asSharp(source).flatten({ background: '#ffffff' });
   const meta = await img.metadata();
 
   const scale = Math.min(1, maxEdge / Math.max(meta.width, meta.height));
@@ -284,11 +301,11 @@ export async function compare(originalBuffer, candidateBuffer, maxEdge = METRIC_
  */
 export const QUALITY_TARGETS = {
   lossless: 0,
-  'visually-lossless': 0.001,
-  high: 0.003,
-  balanced: 0.008,
-  small: 0.02,
-  tiny: 0.05,
+  'visually-lossless': 0.0008,
+  high: 0.0024,
+  balanced: 0.0065,
+  small: 0.016,
+  tiny: 0.04,
 };
 
 /**
@@ -300,8 +317,8 @@ export const QUALITY_TARGETS = {
  */
 export function visualScore(dssim) {
   if (dssim <= 0) return 100;
-  const FLOOR = 0.0004; // below this, nobody can tell
-  const CEIL = 0.1; // by here it's visibly wrecked
+  const FLOOR = 0.0003; // below this, nobody can tell
+  const CEIL = 0.08; // by here it's visibly wrecked
   if (dssim <= FLOOR) return 100;
   if (dssim >= CEIL) return 0;
   const t = Math.log10(dssim / FLOOR) / Math.log10(CEIL / FLOOR);

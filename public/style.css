@@ -209,6 +209,17 @@ input[type="range"] { flex: 1; accent-color: var(--accent); }
 .drop-sub { color: var(--ink-faint); font-size: 13.5px; margin: 0; }
 .linklike { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; text-decoration: underline; text-underline-offset: 2px; }
 
+/* ---------- batch progress ---------- */
+.batch { display: flex; flex-direction: column; gap: 12px; }
+.batch-head { display: flex; align-items: baseline; justify-content: space-between; }
+.batch-title { font-weight: 600; font-size: 15px; }
+.batch-count { color: var(--ink-dim); font-size: 13px; }
+.bar { height: 8px; background: var(--bg-elev-2); border: 1px solid var(--line-soft); border-radius: 20px; overflow: hidden; }
+.bar-fill { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 60%, #7cf)); border-radius: 20px; transition: width 0.3s ease; }
+.batch-foot { font-size: 13px; color: var(--ink-dim); font-family: var(--mono); min-height: 1.2em; }
+.batch-foot .big { color: var(--accent); font-weight: 700; font-family: var(--font); }
+#batchDownload { align-self: flex-start; }
+
 /* ---------- results ---------- */
 .results { grid-column: 2; display: flex; flex-direction: column; gap: 18px; }
 @media (max-width: 860px) { .results { grid-column: 1; } }

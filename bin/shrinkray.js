@@ -13,11 +13,12 @@
  * or a human can trust the output without re-checking.
  */
 
-import { readFile, writeFile, mkdir, stat } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { basename, extname, join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import os from 'node:os';
-import { compress, compressAuto, availableFormats, QUALITY_TARGETS } from '../src/pipeline.js';
+import { availableFormats, QUALITY_TARGETS } from '../src/pipeline.js';
+import { getPool } from '../src/pool.js';
+import { compressZip } from '../src/batch.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -109,33 +110,63 @@ async function runCompress(opts) {
     throw new Error(`Unknown target "${opts.target}". Options: ${Object.keys(QUALITY_TARGETS).join(', ')}`);
   }
 
+  const compressOpts = {
+    mode: opts.mode,
+    format: opts.format,
+    target: opts.target,
+    targetKB: targetBytes ? targetBytes / 1024 : undefined,
+    effort: opts.effort,
+    maxEdge: opts.maxEdge || undefined,
+  };
+
+  // A single .zip input -> a .zip output with the folder structure preserved.
+  const zipInput = opts.files.length === 1 && /\.zip$/i.test(opts.files[0]);
+  if (zipInput) return runZipCli(opts.files[0], compressOpts, opts);
+
   if (opts.out) await mkdir(resolve(opts.out), { recursive: true });
 
   const goal = opts.mode === 'size' ? `≤ ${kb(targetBytes)}` : `${opts.target} fidelity`;
-  console.log(c.dim(`\nShrinkRay · ${goal} · format ${opts.format} · ${opts.files.length} file(s)\n`));
+  const pool = getPool();
+  console.log(c.dim(`\nShrinkRay · ${goal} · format ${opts.format} · ${opts.files.length} file(s) · ${pool.size} workers\n`));
 
-  // Bound parallelism to cores; each AVIF encode is already multi-threaded, so
-  // we don't oversubscribe wildly — half the cores keeps the box responsive.
-  const limit = Math.max(1, Math.floor(os.cpus().length / 2));
-  const queue = [...opts.files];
-  let totalIn = 0, totalOut = 0, ok = 0, failed = 0;
-
-  async function worker() {
-    while (queue.length) {
-      const file = queue.shift();
-      try {
-        const line = await processOne(file, opts, shared);
-        totalIn += line.originalSize;
-        totalOut += line.size;
-        ok++;
-        console.log(line.text);
-      } catch (err) {
-        failed++;
-        console.log(`  ${c.red('✗')} ${basename(file)} — ${err.message}`);
-      }
+  // Read all inputs, then compress them in parallel across the worker pool.
+  const jobs = [];
+  for (const file of opts.files) {
+    try {
+      jobs.push({ input: await readFile(file), options: compressOpts, meta: { file } });
+    } catch (err) {
+      console.log(`  ${c.red('✗')} ${basename(file)} — ${err.message}`);
     }
   }
-  await Promise.all(Array.from({ length: limit }, worker));
+
+  let totalIn = 0, totalOut = 0, ok = 0, failed = 0;
+  const results = await pool.map(jobs, () => {});
+  for (const r of results) {
+    const file = r.meta.file;
+    if (!r.ok || !r.best) {
+      failed++;
+      console.log(`  ${c.red('✗')} ${basename(file)} — ${r.error}`);
+      continue;
+    }
+    const best = r.best;
+    const outPath = destPath(file, best.ext, opts);
+    await writeFile(outPath, Buffer.from(best.bytes));
+    totalIn += best.originalSize;
+    totalOut += best.size;
+    ok++;
+
+    const pct = Math.round((1 - best.ratio) * 100);
+    const pctStr = pct >= 0 ? c.green(`${pct}% smaller`) : c.yellow(`${-pct}% larger`);
+    const flags = [];
+    if (best.grewLargerThanSource) flags.push(c.yellow('⚠ larger than source — keep original'));
+    if (best.targetMet === false) flags.push(c.yellow('⚠ target not reached'));
+    console.log(
+      `  ${c.green('✓')} ${c.bold(basename(file))} ${c.dim('→')} ${basename(outPath)}  ` +
+        `${kb(best.originalSize)} → ${c.bold(kb(best.size))}  ${pctStr}  ` +
+        c.dim(`[${best.label} ${best.note}, score ${best.score}]`) +
+        (flags.length ? '\n      ' + flags.join('  ') : '')
+    );
+  }
 
   if (ok > 1) {
     const saved = totalIn > 0 ? Math.round((1 - totalOut / totalIn) * 100) : 0;
@@ -143,36 +174,34 @@ async function runCompress(opts) {
     console.log(`  ${c.bold('Total')}  ${kb(totalIn)} → ${c.bold(kb(totalOut))}  ${c.green(saved + '% smaller')}  (${ok} ok${failed ? `, ${failed} failed` : ''})`);
   }
   console.log('');
+  await pool.destroy();
   if (failed) process.exitCode = 1;
 }
 
-async function processOne(file, opts, shared) {
-  const input = await readFile(file);
+/** Compress every image inside a ZIP, writing a new ZIP that mirrors its tree. */
+async function runZipCli(zipPath, compressOpts, opts) {
+  const input = await readFile(zipPath);
+  const outPath = opts.out
+    ? (extname(opts.out) === '.zip' ? resolve(opts.out) : join(resolve(opts.out), basename(zipPath, extname(zipPath)) + '-compressed.zip'))
+    : join(dirname(resolve(zipPath)), basename(zipPath, extname(zipPath)) + '-compressed.zip');
+  if (opts.out && extname(opts.out) !== '.zip') await mkdir(resolve(opts.out), { recursive: true });
 
-  let result;
-  if (opts.format === 'auto') {
-    const { best } = await compressAuto(input, shared);
-    result = best;
-  } else {
-    result = await compress(input, { ...shared, format: opts.format });
-  }
+  const goal = compressOpts.mode === 'size' ? `≤ ${compressOpts.targetKB}KB` : `${compressOpts.target} fidelity`;
+  console.log(c.dim(`\nShrinkRay · ZIP · ${goal} · format ${compressOpts.format}\n`));
 
-  const outPath = destPath(file, result.ext, opts);
-  await writeFile(outPath, result.buffer);
+  let lastDone = 0;
+  const { buffer, stats } = await compressZip(input, compressOpts, (ev) => {
+    if (ev.done !== lastDone) {
+      lastDone = ev.done;
+      process.stdout.write(`\r  compressing ${ev.done}/${ev.total}   `);
+    }
+  });
+  await writeFile(outPath, buffer);
+  await getPool().destroy();
 
-  const pct = Math.round((1 - result.ratio) * 100);
-  const pctStr = pct >= 0 ? c.green(`${pct}% smaller`) : c.yellow(`${-pct}% larger`);
-  const flags = [];
-  if (result.grewLargerThanSource) flags.push(c.yellow('⚠ larger than source — keep original'));
-  if (result.targetMet === false) flags.push(c.yellow('⚠ target not reached'));
-
-  const text =
-    `  ${c.green('✓')} ${c.bold(basename(file))} ${c.dim('→')} ${basename(outPath)}  ` +
-    `${kb(result.originalSize)} → ${c.bold(kb(result.size))}  ${pctStr}  ` +
-    c.dim(`[${result.label} ${result.note}, score ${result.score}]`) +
-    (flags.length ? '\n      ' + flags.join('  ') : '');
-
-  return { text, size: result.size, originalSize: result.originalSize };
+  console.log(`\r  ${c.green('✓')} ${stats.compressed} images` + (stats.skipped ? c.dim(` (${stats.skipped} non-image skipped)`) : '') + '        ');
+  console.log(`  ${kb(stats.totalIn)} → ${c.bold(kb(stats.totalOut))}  ${c.green(stats.percentSaved + '% smaller')}`);
+  console.log(`  ${c.dim('→')} ${outPath}\n`);
 }
 
 function destPath(file, ext, opts) {
@@ -191,8 +220,9 @@ async function printHelp() {
 ${c.bold('ShrinkRay')} — local image compressor (AVIF · WebP · JPEG · PNG${formats.includes('jxl') ? ' · JXL' : ''})
 
 ${c.bold('Usage')}
-  shrinkray <files...> [options]
-  shrinkray serve [port]
+  shrinkray <files...> [options]      one or many images (compressed in parallel)
+  shrinkray photos.zip [options]      a ZIP in -> a ZIP out, folder tree preserved
+  shrinkray serve [port]              launch the drag-and-drop web UI
 
 ${c.bold('Modes')}
   ${c.cyan('--target <name>')}   keep visual quality; pick the smallest file within it

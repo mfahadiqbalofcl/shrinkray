@@ -78,13 +78,24 @@
 
       <div class="workspace">
         <!-- Drop zone -->
-        <section class="panel drop" id="drop" tabindex="0" aria-label="Drop images to compress">
-          <input id="file" type="file" accept="image/*" multiple hidden />
+        <section class="panel drop" id="drop" tabindex="0" aria-label="Drop images or a ZIP to compress">
+          <input id="file" type="file" accept="image/*,.zip,application/zip" multiple hidden />
           <div class="drop-inner">
             <div class="drop-icon">↓</div>
-            <p class="drop-title">Drop images here</p>
-            <p class="drop-sub">or <button type="button" class="linklike" id="browse">browse</button> · JPEG, PNG, WebP, AVIF, TIFF, GIF</p>
+            <p class="drop-title">Drop images or a .zip here</p>
+            <p class="drop-sub">or <button type="button" class="linklike" id="browse">browse</button> · a ZIP comes back a ZIP, folders intact</p>
           </div>
+        </section>
+
+        <!-- Batch progress + summary (shown for ZIPs and large batches) -->
+        <section class="panel batch hidden" id="batch" aria-live="polite">
+          <div class="batch-head">
+            <span class="batch-title" id="batchTitle">Compressing…</span>
+            <span class="batch-count mono" id="batchCount">0 / 0</span>
+          </div>
+          <div class="bar"><div class="bar-fill" id="batchBar"></div></div>
+          <div class="batch-foot" id="batchFoot"></div>
+          <a class="btn primary hidden" id="batchDownload" download>↓ Download ZIP</a>
         </section>
 
         <!-- Results -->
