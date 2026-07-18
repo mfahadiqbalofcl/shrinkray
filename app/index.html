@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>ShrinkRay — compress images in your browser</title>
+    <meta name="description" content="Compress images to AVIF, WebP, JPEG or PNG right in your browser. Nothing is uploaded. Free, unlimited, private." />
+    <meta name="theme-color" content="#f6f4ee" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="/src/ui/styles.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="site-head">
+        <a class="brand" href="/">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Shrink<b>Ray</b></span>
+        </a>
+        <div class="head-right">
+          <span class="pill">Runs in your browser · <b>nothing uploaded</b></span>
+          <button class="icon-btn" id="theme" title="Toggle theme" aria-label="Toggle theme">☾</button>
+        </div>
+      </header>
+
+      <section class="hero">
+        <h1>Compress images <em>without</em> the quality tax.</h1>
+        <p>Drop in photos and get back <b>the smallest file that still looks right</b> — measured perceptually, not guessed. AVIF, WebP, JPEG, PNG. It all runs on your device, so nothing is ever uploaded.</p>
+      </section>
+
+      <div class="layout">
+        <!-- Controls -->
+        <aside class="panel controls" aria-label="Compression settings">
+          <div class="control-group">
+            <span class="label">Goal</span>
+            <div class="seg" id="mode" role="tablist">
+              <button type="button" data-mode="quality" class="on" role="tab">Keep quality</button>
+              <button type="button" data-mode="size" role="tab">Target a size</button>
+            </div>
+          </div>
+
+          <div class="control-group" data-for="quality">
+            <span class="label">Preset</span>
+            <div class="presets" id="presets"></div>
+          </div>
+
+          <div class="control-group" data-for="size" hidden>
+            <span class="label">Target size</span>
+            <div class="field row">
+              <input type="number" id="targetKB" value="200" min="1" step="10" />
+              <span class="suffix">KB</span>
+            </div>
+            <p class="hint">Fills the budget at the best quality it can, and downscales only if it truly must.</p>
+          </div>
+
+          <div class="control-group">
+            <span class="label">Format</span>
+            <select id="format" aria-label="Output format">
+              <option value="auto" selected>Auto — pick the smallest</option>
+              <option value="avif">AVIF (smallest)</option>
+              <option value="webp">WebP (fast, universal)</option>
+              <option value="jpeg">JPEG (max compatibility)</option>
+              <option value="png">PNG (lossless)</option>
+            </select>
+          </div>
+
+          <div class="control-group">
+            <span class="label">Resize</span>
+            <select id="resize" aria-label="Resize images">
+              <option value="0" selected>Keep original size</option>
+              <option value="4000">Max 4000px</option>
+              <option value="2560">Max 2560px (web)</option>
+              <option value="1920">Max 1920px</option>
+              <option value="1280">Max 1280px</option>
+            </select>
+          </div>
+
+          <details class="adv">
+            <summary>Advanced</summary>
+            <div class="control-group" style="margin-top:14px">
+              <div class="field row">
+                <span class="label" style="flex:1">Effort</span>
+                <input type="range" id="effort" min="0" max="9" value="4" style="flex:2" />
+                <span class="suffix" id="effortVal">auto</span>
+              </div>
+              <p class="hint">Higher effort = smaller files, slower encode. Leave on auto for a fast, small result.</p>
+              <label class="check"><input type="checkbox" id="stripExif" checked /> Strip metadata (EXIF, GPS)</label>
+            </div>
+          </details>
+        </aside>
+
+        <!-- Workspace -->
+        <main class="workspace">
+          <section class="drop" id="drop" tabindex="0" aria-label="Drop images to compress">
+            <input id="file" type="file" accept="image/*" multiple hidden />
+            <div class="drop-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="M7 11l5 5 5-5"/><path d="M5 21h14"/></svg>
+            </div>
+            <p class="drop-title">Drop your images here</p>
+            <p class="drop-sub">or <button type="button" class="linklike" id="browse">browse</button> · drop as many as you like, all at once</p>
+          </section>
+
+          <div class="summary" id="summary">
+            <div class="summary-stat">
+              <span class="summary-big" id="summaryBig">—</span>
+              <span class="summary-sub" id="summarySub"></span>
+            </div>
+            <div class="summary-actions">
+              <button type="button" class="btn ghost" id="clearAll">Clear</button>
+              <a class="btn primary" id="downloadAll" hidden>↓ Download all (ZIP)</a>
+            </div>
+          </div>
+
+          <section class="results" id="results" aria-live="polite"></section>
+        </main>
+      </div>
+
+      <footer class="site-foot">
+        <span>ShrinkRay — perceptual image compression, in your browser. MIT · open source.</span>
+        <span><a href="https://github.com/mfahadiqbalofcl/shrinkray" target="_blank" rel="noopener">GitHub</a></span>
+      </footer>
+    </div>
+
+    <!-- result card template -->
+    <template id="cardTpl">
+      <article class="card">
+        <div class="cmp" data-role="cmp">
+          <img data-role="before" alt="original" />
+          <div class="after-wrap"><img data-role="after" alt="compressed" /></div>
+          <span class="cmp-tag l">before</span>
+          <span class="cmp-tag r">after</span>
+          <div class="cmp-handle">◂ ▸</div>
+        </div>
+        <div class="card-body">
+          <div class="card-top">
+            <span class="card-name" data-role="name"></span>
+            <span class="badge" data-role="badge"></span>
+          </div>
+          <div class="stats">
+            <div class="stat"><div class="n" data-role="newSize"></div><div class="l">new size</div></div>
+            <div class="stat"><div class="n accent" data-role="saved"></div><div class="l">smaller</div></div>
+            <div class="stat"><div class="n" data-role="score"></div><div class="l">visual match</div></div>
+          </div>
+          <div class="meter"><i data-role="meter"></i></div>
+          <div class="meta-line" data-role="meta"></div>
+          <div class="warnline" data-role="warn" hidden></div>
+          <div class="card-actions">
+            <a class="btn primary" data-role="download">↓ Download</a>
+          </div>
+        </div>
+      </article>
+    </template>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
