@@ -5,12 +5,20 @@
  */
 
 import { compress, compressAuto, probeOnce } from './compress.js';
+import { encode } from './codecs.js';
 
 const OPS = { auto: compressAuto, single: compress, probe: probeOnce };
 
 self.onmessage = async (e) => {
   const { id, op, input, inputType, opts } = e.data;
   try {
+    // Warm a codec: download + compile its WASM ahead of the first real job,
+    // so the first compression isn't stalled waiting on a network fetch.
+    if (op === 'warm') {
+      await encode(new ImageData(2, 2), opts.format, { quality: 50, effort: 4 });
+      self.postMessage({ id, ok: true, result: { warmed: opts.format } });
+      return;
+    }
     const fn = OPS[op] || compress;
     const result = await fn(input, inputType, opts);
 

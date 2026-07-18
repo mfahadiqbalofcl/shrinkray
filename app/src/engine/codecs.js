@@ -48,7 +48,9 @@ export async function encode(imageData, format, { quality = 75, effort = 4 } = {
       return m.encode(imageData, { quality, method: clamp(effort, 0, 6) });
     case 'avif': {
       // jSquash avif: quality 0-100, speed 0(slow)-10(fast). Map effort 0-9 -> speed.
-      const speed = clamp(10 - Math.round(effort), 0, 10);
+      // Floor the speed at 8: single-threaded AVIF below that runs for many seconds
+      // (speed 7 ~5.6s, speed 4 ~90s on a busy image), which would freeze the tab.
+      const speed = clamp(10 - Math.round(effort), 8, 10);
       return m.encode(imageData, { quality, speed });
     }
     case 'png':

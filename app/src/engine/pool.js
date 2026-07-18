@@ -72,6 +72,16 @@ export class Pool {
   /** Encode once at an explicit quality (live precision tuning). */
   probe(input, inputType, opts) { return this._submit('probe', input, inputType, opts); }
 
+  /**
+   * Preload a codec so the first real compress isn't stalled on a network fetch.
+   * One worker compiles the WASM, which also primes the browser's HTTP cache, so
+   * any other worker that later needs the same codec fetches it from cache. We
+   * deliberately warm only ONE worker, not all of them: firing a warm on every
+   * worker at once triggers a herd of concurrent cold WASM compiles that saturate
+   * the CPU and actually slow down the very first compression.
+   */
+  warm(format) { return this._submit('warm', new ArrayBuffer(0), '', { format }).catch(() => {}); }
+
   destroy() { this._workers.forEach((w) => w.terminate()); this._workers = []; this._idle = []; }
 }
 

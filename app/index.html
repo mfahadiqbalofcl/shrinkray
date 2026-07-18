@@ -6,6 +6,7 @@
     <title>ShrinkRay · compress images in your browser</title>
     <meta name="description" content="Compress images to AVIF, WebP, JPEG or PNG right in your browser. Nothing is uploaded. Free, unlimited, private." />
     <meta name="theme-color" content="#f6f4ee" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230f9d6b'/%3E%3Cpath d='M16 6v13M11 15l5 5 5-5M9 25h14' fill='none' stroke='%23f6f4ee' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="/src/ui/styles.css" />
@@ -56,11 +57,11 @@
           <div class="control-group">
             <span class="label">Format</span>
             <select id="format" aria-label="Output format">
-              <option value="auto" selected>Auto (pick the smallest)</option>
-              <option value="avif">AVIF (smallest)</option>
-              <option value="webp">WebP (fast, universal)</option>
+              <option value="webp" selected>WebP (fast, recommended)</option>
+              <option value="avif">AVIF (smallest, slower)</option>
               <option value="jpeg">JPEG (max compatibility)</option>
               <option value="png">PNG (lossless)</option>
+              <option value="auto">Auto (compare all, slower)</option>
             </select>
           </div>
 

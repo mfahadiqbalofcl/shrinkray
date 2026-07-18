@@ -21,7 +21,7 @@ const SEED = {
   tiny: { avif: 28, webp: 45, jpeg: 45 },
 };
 
-async function bisect(probe, satisfies, prefer, [lo, hi], seed, { maxIters = 5, goodEnough, climbCapAt } = {}) {
+async function bisect(probe, satisfies, prefer, [lo, hi], seed, { maxIters = 3, goodEnough, climbCapAt } = {}) {
   let best = null;
   const seen = new Map();
   const at = async (q) => {
@@ -53,8 +53,18 @@ async function bisect(probe, satisfies, prefer, [lo, hi], seed, { maxIters = 5, 
  */
 // AVIF is the one slow WASM codec, so search it FAST and re-encode the winner
 // at a better setting once. Other formats encode quickly, so search == final.
-const FINAL_EFFORT = { avif: 4, webp: 4, jpeg: 1, png: 0 };
-const SEARCH_EFFORT = { avif: 1, webp: 4, jpeg: 1, png: 0 };
+// WebP `method` trades encode time for file size at essentially constant DSSIM,
+// so we SEARCH quality with the cheap fast setting (correct perceptual guidance,
+// a fraction of the time) and re-encode the winner once at the slower setting for
+// the smaller final file. JPEG has no such knob.
+//
+// AVIF is the exception: its `speed` knob is wildly nonlinear in a single-threaded
+// WASM build — measured here, speed 10 ~0.5s, speed 7 ~5.6s, speed 4 ~90s, for a
+// tiny size gain. Anything below speed ~9 makes a browser tab unusable, so AVIF
+// runs at max speed (effort 0) for both search and final. codecs.js also clamps a
+// hard floor so a manual effort slider can't freeze the tab.
+const FINAL_EFFORT = { avif: 0, webp: 4, jpeg: 1, png: 0 };
+const SEARCH_EFFORT = { avif: 0, webp: 0, jpeg: 1, png: 0 };
 
 async function run(source, fmt, opts, ctx) {
   const reference = await referenceFromImageData(source);

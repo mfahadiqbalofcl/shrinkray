@@ -14,7 +14,7 @@ const state = {
   preset: 'balanced',
   target: 'balanced',
   targetKB: 200,
-  format: 'auto',
+  format: 'webp', // fast + tiny WASM by default; AVIF/Auto are opt-in
   maxEdge: 0,
   effort: null, // null = auto (fast search / small final per format)
   renamePattern: '',
@@ -37,6 +37,7 @@ function init() {
   bindDrop();
   bindTheme();
   wireModal();
+  pool.warm('webp'); // prime the HTTP cache + compile the default codec on one worker while the user picks a file
 }
 
 // --- controls ---------------------------------------------------------------
@@ -72,7 +73,13 @@ function bindControls() {
     document.querySelectorAll('[data-for]').forEach((el) => { el.hidden = el.dataset.for !== state.mode; });
   });
   $('#targetKB').addEventListener('input', (e) => (state.targetKB = Number(e.target.value) || 1));
-  $('#format').addEventListener('change', (e) => (state.format = e.target.value));
+  $('#format').addEventListener('change', (e) => {
+    state.format = e.target.value;
+    // prime the chosen codec(s) so the next compress doesn't wait on a WASM fetch.
+    // One worker each: enough to warm the HTTP cache without a herd of cold compiles.
+    if (state.format === 'auto') { pool.warm('avif'); pool.warm('webp'); pool.warm('jpeg'); }
+    else if (state.format !== 'png') pool.warm(state.format);
+  });
   $('#resize').addEventListener('change', (e) => (state.maxEdge = Number(e.target.value) || 0));
   const effort = $('#effort'), effortVal = $('#effortVal');
   effort.addEventListener('input', (e) => {
@@ -151,11 +158,23 @@ async function compressOne(file, opts) {
   try {
     const buf = await file.arrayBuffer();
     const auto = !opts.format;
-    const res = auto
-      ? await pool.runAuto(buf, file.type, { ...opts, formats: ['avif', 'webp', 'jpeg'] })
-      : await pool.run(buf, file.type, { ...opts, format: opts.format });
-    const best = auto ? res.best : res;
-    const candidates = auto ? res.candidates : [res];
+    let best, candidates;
+    if (auto) {
+      // Run the formats in PARALLEL across workers (not sequentially in one),
+      // so Auto takes about as long as its slowest format instead of the sum.
+      const formats = ['avif', 'webp', 'jpeg'];
+      const settled = await Promise.all(formats.map((f) =>
+        pool.run(buf.slice(0), file.type, { ...opts, format: f }).catch((e) => ({ error: e.message }))
+      ));
+      const ok = settled.filter((r) => !r.error);
+      if (!ok.length) throw new Error(settled[0]?.error || 'Compression failed');
+      const met = ok.filter((r) => r.targetMet !== false);
+      best = (met.length ? met : ok).reduce((a, b) => (a.size <= b.size ? a : b));
+      candidates = ok.slice().sort((a, b) => a.size - b.size);
+    } else {
+      best = await pool.run(buf, file.type, { ...opts, format: opts.format });
+      candidates = [best];
+    }
     const entry = { name: file.name, best };
     done.push(entry);
     renderResult(card, file, best, candidates, entry);
