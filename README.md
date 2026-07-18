@@ -1,8 +1,11 @@
 # ShrinkRay 🗜️
 
-A local-first image compressor you run yourself. Free, private, open source, no limits.
+A local-first image compressor. Free, private, open source, no limits. It comes in two forms that share one perceptual engine:
 
-Drop in a JPEG/PNG/WebP/AVIF/TIFF/GIF, or a whole `.zip` of them, and get back the smallest AVIF, WebP, JPEG, PNG (or JXL). You can either keep the image visually identical or make it fit an exact KB budget. Nothing is uploaded. Every byte is processed on your own machine by [sharp](https://sharp.pixelplumbing.com/) (libvips), in parallel across your CPU cores. No accounts, no limits, no "upgrade to Pro."
+- **[Use it in your browser →](https://shrinkray-app.vercel.app)** — nothing to install, nothing uploaded. Compresses entirely on your device (WebAssembly codecs), works on desktop and phone, with a live before/after tuner. Source in [`app/`](app/).
+- **Run it yourself** — a Node server + CLI (this repo root) built on [sharp](https://sharp.pixelplumbing.com/) for native speed, ZIP-folder batches, and 1 GB+ archives.
+
+Drop in a JPEG/PNG/WebP/AVIF/TIFF/GIF, or a whole `.zip` of them, and get back the smallest AVIF, WebP, JPEG, PNG (or JXL). You can either keep the image visually identical or make it fit an exact KB budget. No accounts, no limits, no "upgrade to Pro."
 
 It covers the three things that make online compressors annoying:
 
