@@ -105,6 +105,10 @@
               <span class="summary-big" id="summaryBig">—</span>
               <span class="summary-sub" id="summarySub"></span>
             </div>
+            <label class="summary-rename" id="renameWrap" hidden>
+              <span class="label">Rename</span>
+              <input type="text" id="renamePattern" placeholder="e.g. photo-{n}" aria-label="Rename pattern" />
+            </label>
             <div class="summary-actions">
               <button type="button" class="btn ghost" id="clearAll">Clear</button>
               <a class="btn primary" id="downloadAll" hidden>↓ Download all (ZIP)</a>
@@ -145,11 +149,47 @@
           <div class="meta-line" data-role="meta"></div>
           <div class="warnline" data-role="warn" hidden></div>
           <div class="card-actions">
+            <button type="button" class="btn ghost" data-role="tune">Tune</button>
             <a class="btn primary" data-role="download">↓ Download</a>
           </div>
         </div>
       </article>
     </template>
+
+    <!-- precision tuning modal -->
+    <div class="modal" id="tune" hidden role="dialog" aria-modal="true" aria-label="Tune compression">
+      <div class="modal-scrim" data-close></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <span class="modal-title" id="tuneTitle"></span>
+          <button type="button" class="icon-btn" data-close aria-label="Close">✕</button>
+        </div>
+        <div class="cmp modal-compare" id="tuneCmp">
+          <img data-role="before" alt="original" />
+          <div class="after-wrap"><img data-role="after" alt="compressed" /></div>
+          <span class="cmp-tag l">before</span>
+          <span class="cmp-tag r">after</span>
+          <div class="cmp-handle">◂ ▸</div>
+          <div class="tune-busy" id="tuneBusy" hidden><span class="spinner"></span> encoding…</div>
+        </div>
+        <div class="modal-controls">
+          <div class="tune-formats" id="tuneFormats"></div>
+          <div class="tune-quality" id="tuneQualityBox">
+            <div class="tune-q-row"><span class="label">Quality</span><span class="mono" id="tuneQVal">75</span></div>
+            <input type="range" id="tuneQ" min="1" max="100" value="75" aria-label="Quality" />
+          </div>
+          <div class="tune-stats">
+            <div class="stat"><div class="n" id="tuneSize">—</div><div class="l">size</div></div>
+            <div class="stat"><div class="n accent" id="tuneSaved">—</div><div class="l">smaller</div></div>
+            <div class="stat"><div class="n" id="tuneScore">—</div><div class="l">visual match</div></div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn ghost" data-close>Cancel</button>
+          <button type="button" class="btn primary" id="tuneApply">Use this version</button>
+        </div>
+      </div>
+    </div>
 
     <script type="module" src="/src/main.js"></script>
   </body>

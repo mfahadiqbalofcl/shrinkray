@@ -17,6 +17,7 @@ const state = {
   format: 'auto',
   maxEdge: 0,
   effort: null, // null = auto (fast search / small final per format)
+  renamePattern: '',
 };
 
 const PRESETS = [
@@ -35,6 +36,7 @@ function init() {
   bindControls();
   bindDrop();
   bindTheme();
+  wireModal();
 }
 
 // --- controls ---------------------------------------------------------------
@@ -79,6 +81,7 @@ function bindControls() {
   });
   effort.addEventListener('dblclick', () => { state.effort = null; effortVal.textContent = 'auto'; });
   $('#clearAll').addEventListener('click', clearAll);
+  $('#renamePattern').addEventListener('input', (e) => { state.renamePattern = e.target.value; applyRename(); });
 }
 
 function bindTheme() {
@@ -153,8 +156,9 @@ async function compressOne(file, opts) {
       : await pool.run(buf, file.type, { ...opts, format: opts.format });
     const best = auto ? res.best : res;
     const candidates = auto ? res.candidates : [res];
-    renderResult(card, file, best, candidates);
-    done.push({ name: file.name, best });
+    const entry = { name: file.name, best };
+    done.push(entry);
+    renderResult(card, file, best, candidates, entry);
   } catch (err) {
     renderError(card, file.name, err.message);
   }
@@ -185,35 +189,62 @@ function renderError(card, name, msg) {
   card.append(wrap);
 }
 
-function renderResult(card, file, best, candidates) {
+function renderResult(pendingCard, file, best, candidates, entry) {
   const tpl = $('#cardTpl').content.cloneNode(true);
   const root = tpl.querySelector('.card');
-  const el = (r) => tpl.querySelector(`[data-role="${r}"]`);
-  const pct = Math.round((1 - best.ratio) * 100);
-  const outBlob = new Blob([best.bytes], { type: best.mime });
-  const outUrl = URL.createObjectURL(outBlob);
+  const el = (r) => root.querySelector(`[data-role="${r}"]`);
+  const beforeUrl = URL.createObjectURL(file);
+  let outUrl = null;
 
-  el('before').src = URL.createObjectURL(file);
-  el('after').src = outUrl;
-  el('name').textContent = file.name;
-  el('badge').textContent = best.label;
-  el('newSize').textContent = fmtSize(best.size);
-  el('saved').textContent = pct >= 0 ? `${pct}%` : `+${-pct}%`;
-  el('score').textContent = String(best.score);
-  el('meter').style.width = `${Math.max(2, best.score)}%`;
-  el('meta').textContent = `${best.width}×${best.height} · ${best.note} · ${candidates.map((c) => `${c.label} ${fmtSize(c.size)}`).join('  ')}`;
+  // paint() fills the card from a result, and can be re-run when the user tunes.
+  const paint = (res, cands) => {
+    if (outUrl) URL.revokeObjectURL(outUrl);
+    outUrl = URL.createObjectURL(new Blob([res.bytes], { type: res.mime }));
+    const pct = Math.round((1 - res.ratio) * 100);
+    el('before').src = beforeUrl;
+    el('after').src = outUrl;
+    el('name').textContent = file.name;
+    el('badge').textContent = res.label;
+    el('newSize').textContent = fmtSize(res.size);
+    el('saved').textContent = pct >= 0 ? `${pct}%` : `+${-pct}%`;
+    el('score').textContent = String(res.score);
+    el('meter').style.width = `${Math.max(2, res.score)}%`;
+    el('meta').textContent = `${res.width}×${res.height} · ${res.note}` + (cands && cands.length > 1 ? ' · ' + cands.map((c) => `${c.label} ${fmtSize(c.size)}`).join('  ') : '');
+    const w = el('warn');
+    const warns = [];
+    if (res.grewLargerThanSource) warns.push('Larger than your original; it was already well optimised, so keep the original.');
+    if (res.targetMet === false) warns.push('This format could not reach that fidelity. Try AVIF.');
+    if (warns.length) { w.hidden = false; w.textContent = '⚠ ' + warns.join(' '); } else { w.hidden = true; }
+    const dl = el('download');
+    dl.href = outUrl;
+    dl.download = file.name.replace(/\.[^.]+$/, '') + '.' + res.ext;
+  };
 
-  const warns = [];
-  if (best.grewLargerThanSource) warns.push('Larger than your original — it was already well optimised, so keep the original.');
-  if (best.targetMet === false) warns.push(state.mode === 'size' ? 'Could not reach that size even after downscaling; this is the smallest.' : 'This format could not reach that fidelity. Try AVIF.');
-  if (warns.length) { const w = el('warn'); w.hidden = false; w.textContent = '⚠ ' + warns.join(' '); }
+  entry.el = root;
+  entry.repaint = paint; // so a tune-apply can re-render this exact card
+  paint(best, candidates);
+  el('tune').addEventListener('click', () => openTune(file, entry.best, (tuned) => { entry.best = tuned; paint(tuned, [tuned]); applyRename(); refreshSummary(); }));
 
-  const dl = el('download');
-  dl.href = outUrl;
-  dl.download = file.name.replace(/\.[^.]+$/, '') + '.' + best.ext;
-
-  card.replaceWith(root);
+  pendingCard.replaceWith(root);
   wireCompare(root.querySelector('.cmp'));
+  applyRename();
+}
+
+/** Compute an output filename for an entry, honouring the rename pattern. */
+function computeName(entry, i) {
+  const base = entry.name.replace(/\.[^.]+$/, '');
+  const ext = entry.best.ext;
+  const p = state.renamePattern.trim();
+  const stem = p ? p.replace(/\{n\}/g, String(i + 1)).replace(/\{name\}/g, base) : base;
+  return `${stem}.${ext}`;
+}
+
+/** Push current filenames onto every card's download link. */
+function applyRename() {
+  done.forEach((e, i) => {
+    const a = e.el?.querySelector('[data-role="download"]');
+    if (a) a.download = computeName(e, i);
+  });
 }
 
 function wireCompare(cmp) {
@@ -234,6 +265,92 @@ function wireCompare(cmp) {
   cmp.addEventListener('mousemove', (e) => { if (!dragging) set(e.clientX); });
 }
 
+// --- precision tuning modal -------------------------------------------------
+
+const TUNE_FORMATS = [
+  { id: 'avif', label: 'AVIF' }, { id: 'webp', label: 'WebP' },
+  { id: 'jpeg', label: 'JPEG' }, { id: 'png', label: 'PNG' },
+];
+let tuneCtx = null; // { file, onApply, format, quality, last }
+
+function openTune(file, current, onApply) {
+  const modal = $('#tune');
+  const q = parseInt((current.note || '').replace(/\D/g, ''), 10);
+  tuneCtx = { file, onApply, format: current.format, quality: Number.isFinite(q) ? q : 75, last: current };
+
+  $('#tuneTitle').textContent = file.name;
+  $('#tuneCmp [data-role="before"]').src = URL.createObjectURL(file);
+  paintTune(current);
+
+  // format tabs
+  const box = $('#tuneFormats'); box.textContent = '';
+  for (const f of TUNE_FORMATS) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'tune-fmt' + (f.id === tuneCtx.format ? ' on' : '');
+    b.textContent = f.label; b.dataset.id = f.id;
+    b.addEventListener('click', () => { tuneCtx.format = f.id; document.querySelectorAll('.tune-fmt').forEach((e) => e.classList.toggle('on', e.dataset.id === f.id)); reflectPngState(); scheduleProbe(); });
+    box.appendChild(b);
+  }
+  const slider = $('#tuneQ');
+  slider.value = String(tuneCtx.quality);
+  $('#tuneQVal').textContent = String(tuneCtx.quality);
+  reflectPngState();
+
+  modal.hidden = false;
+  document.body.style.overflow = 'hidden';
+}
+
+function reflectPngState() {
+  $('#tuneQualityBox').classList.toggle('off', tuneCtx.format === 'png');
+}
+
+function paintTune(res) {
+  const url = URL.createObjectURL(new Blob([res.bytes], { type: res.mime }));
+  $('#tuneCmp [data-role="after"]').src = url;
+  const pct = Math.round((1 - res.ratio) * 100);
+  $('#tuneSize').textContent = fmtSize(res.size);
+  $('#tuneSaved').textContent = pct >= 0 ? `${pct}%` : `+${-pct}%`;
+  $('#tuneScore').textContent = res.format === 'png' ? '100' : String(res.score);
+  tuneCtx.last = res;
+}
+
+let probeTimer = null;
+function scheduleProbe() {
+  clearTimeout(probeTimer);
+  probeTimer = setTimeout(runProbe, 180);
+}
+async function runProbe() {
+  if (!tuneCtx) return;
+  const busy = $('#tuneBusy'); busy.hidden = false;
+  try {
+    const buf = await tuneCtx.file.arrayBuffer();
+    const res = await pool.probe(buf, tuneCtx.file.type, {
+      format: tuneCtx.format, quality: tuneCtx.quality,
+      maxEdge: state.maxEdge || undefined, effort: state.effort ?? undefined,
+    });
+    if (tuneCtx) paintTune(res);
+  } catch (err) {
+    console.error(err);
+  } finally {
+    busy.hidden = true;
+  }
+}
+
+function wireModal() {
+  const modal = $('#tune');
+  modal.addEventListener('click', (e) => { if (e.target.dataset.close !== undefined) closeTune(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.hidden) closeTune(); });
+  const slider = $('#tuneQ');
+  slider.addEventListener('input', (e) => { tuneCtx.quality = Number(e.target.value); $('#tuneQVal').textContent = e.target.value; scheduleProbe(); });
+  $('#tuneApply').addEventListener('click', () => { if (tuneCtx?.last) tuneCtx.onApply(tuneCtx.last); closeTune(); });
+  wireCompare($('#tuneCmp'));
+}
+function closeTune() {
+  $('#tune').hidden = true;
+  document.body.style.overflow = '';
+  tuneCtx = null;
+}
+
 // --- summary + download all -------------------------------------------------
 
 function refreshSummary() {
@@ -245,6 +362,7 @@ function refreshSummary() {
   const pct = totalIn ? Math.round((1 - totalOut / totalIn) * 100) : 0;
   $('#summaryBig').innerHTML = `<span class="accent">${pct}%</span> smaller`;
   $('#summarySub').textContent = `${done.length} image${done.length > 1 ? 's' : ''} · ${fmtSize(totalIn)} → ${fmtSize(totalOut)}`;
+  $('#renameWrap').hidden = done.length < 1;
   const dl = $('#downloadAll');
   dl.hidden = done.length < 2;
   dl.onclick = downloadAll;
@@ -253,14 +371,15 @@ function refreshSummary() {
 function downloadAll() {
   const taken = new Set();
   const tree = {};
-  for (const d of done) {
-    let name = d.name.replace(/\.[^.]+$/, '') + '.' + d.best.ext;
+  done.forEach((d, i) => {
+    let name = computeName(d, i);
+    const base = name.replace(/\.[^.]+$/, ''), ext = d.best.ext;
     let n = 2;
-    while (taken.has(name)) name = d.name.replace(/\.[^.]+$/, '') + `-${n++}.` + d.best.ext;
+    while (taken.has(name)) name = `${base}-${n++}.${ext}`;
     taken.add(name);
     tree[name] = [new Uint8Array(d.best.bytes.slice(0)), { level: 0 }];
-  }
-  tree['README.txt'] = [strToU8('Compressed with ShrinkRay — https://github.com/mfahadiqbalofcl/shrinkray\n'), { level: 6 }];
+  });
+  tree['README.txt'] = [strToU8('Compressed with ShrinkRay. https://github.com/mfahadiqbalofcl/shrinkray\n'), { level: 6 }];
   const zip = zipSync(tree);
   const url = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }));
   const a = document.createElement('a');

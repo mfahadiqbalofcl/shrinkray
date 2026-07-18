@@ -69,6 +69,9 @@ export class Pool {
   /** Compress trying several formats; resolves { best, candidates }. */
   runAuto(input, inputType, opts) { return this._submit('auto', input, inputType, opts); }
 
+  /** Encode once at an explicit quality (live precision tuning). */
+  probe(input, inputType, opts) { return this._submit('probe', input, inputType, opts); }
+
   destroy() { this._workers.forEach((w) => w.terminate()); this._workers = []; this._idle = []; }
 }
 

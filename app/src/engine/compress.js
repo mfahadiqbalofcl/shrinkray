@@ -148,6 +148,31 @@ export async function compress(input, inputType, opts) {
   return run(source, fmt, opts, { originalSize });
 }
 
+/**
+ * Encode ONCE at an explicit quality (no search). Powers the live precision
+ * panel, where the user drags a quality slider and sees the result update.
+ */
+export async function probeOnce(input, inputType, opts) {
+  const fmt = FORMATS[opts.format];
+  if (!fmt) throw new Error(`Unknown format: ${opts.format}`);
+  const originalSize = input.byteLength ?? input.length;
+  let source = opts.maxEdge ? await decodeScaled(input, inputType, opts.maxEdge) : await decode(input, inputType);
+  if (!fmt.alpha && hasAlpha(source)) source = await flatten(source, opts.background);
+  const reference = await referenceFromImageData(source);
+  const quality = fmt.lossy ? clamp(Math.round(opts.quality ?? 75), 1, 100) : 100;
+  const effort = opts.effort ?? FINAL_EFFORT[fmt.id] ?? 4;
+  const buffer = await encode(source, fmt.id, { quality, effort });
+  const d = fmt.lossy ? await compareToReference(reference, buffer, fmt.mime) : 0;
+  const size = buffer.byteLength;
+  return {
+    bytes: buffer, format: fmt.id, label: fmt.label, ext: fmt.ext, mime: fmt.mime,
+    size, dssim: d, score: visualScore(d), quality,
+    width: source.width, height: source.height, originalSize,
+    ratio: size / originalSize, savedBytes: originalSize - size,
+    grewLargerThanSource: size >= originalSize, note: `q${quality}`, targetMet: true,
+  };
+}
+
 /** Try several formats, return the smallest that met the goal + all candidates. */
 export async function compressAuto(input, inputType, opts) {
   const wanted = opts.formats?.length ? opts.formats : ['avif', 'webp', 'jpeg'];
