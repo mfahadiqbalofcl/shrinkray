@@ -68,7 +68,7 @@ function bindControls() {
     const btn = e.target.closest('button[data-mode]');
     if (!btn) return;
     state.mode = btn.dataset.mode;
-    document.querySelectorAll('#mode button').forEach((b) => b.classList.toggle('on', b === btn));
+    document.querySelectorAll('#mode button').forEach((b) => { b.classList.toggle('on', b === btn); b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'); });
     document.querySelectorAll('[data-for]').forEach((el) => { el.hidden = el.dataset.for !== state.mode; });
   });
   $('#targetKB').addEventListener('input', (e) => (state.targetKB = Number(e.target.value) || 1));
@@ -105,12 +105,12 @@ function applyThemeVars(theme) {
     s.setProperty('--paper', '#16150f'); s.setProperty('--paper-2', '#100f0a'); s.setProperty('--card', '#201e17');
     s.setProperty('--ink', '#f4f1e8'); s.setProperty('--ink-70', '#c7c2b4'); s.setProperty('--ink-45', '#8f897a');
     s.setProperty('--line', '#322f26'); s.setProperty('--line-2', '#413d31');
-    s.setProperty('--accent', '#2fd08c'); s.setProperty('--accent-bright', '#4ee0a3'); s.setProperty('--accent-ink', '#0c1510'); s.setProperty('--accent-wash', '#16261e');
+    s.setProperty('--accent', '#2fd08c'); s.setProperty('--accent-strong', '#2fd08c'); s.setProperty('--accent-bright', '#4ee0a3'); s.setProperty('--accent-ink', '#0c1510'); s.setProperty('--accent-wash', '#16261e');
   } else {
     s.setProperty('--paper', '#f6f4ee'); s.setProperty('--paper-2', '#efece3'); s.setProperty('--card', '#fffdf8');
-    s.setProperty('--ink', '#1a1815'); s.setProperty('--ink-70', '#4a463f'); s.setProperty('--ink-45', '#837d72');
+    s.setProperty('--ink', '#1a1815'); s.setProperty('--ink-70', '#4a463f'); s.setProperty('--ink-45', '#6d685c');
     s.setProperty('--line', '#e2ddd1'); s.setProperty('--line-2', '#d3cdbf');
-    s.setProperty('--accent', '#0f9d6b'); s.setProperty('--accent-bright', '#17c281'); s.setProperty('--accent-ink', '#fffdf8'); s.setProperty('--accent-wash', '#e7f4ee');
+    s.setProperty('--accent', '#0f9d6b'); s.setProperty('--accent-strong', '#0b7d54'); s.setProperty('--accent-bright', '#17c281'); s.setProperty('--accent-ink', '#ffffff'); s.setProperty('--accent-wash', '#e7f4ee');
   }
 }
 
@@ -296,8 +296,21 @@ function openTune(file, current, onApply) {
   $('#tuneQVal').textContent = String(tuneCtx.quality);
   reflectPngState();
 
+  tuneCtx.opener = document.activeElement; // restore focus here on close
   modal.hidden = false;
   document.body.style.overflow = 'hidden';
+  (modal.querySelector('.icon-btn') || slider).focus();
+}
+
+// Keep Tab focus inside the open modal (basic focus trap).
+function trapFocus(e) {
+  const modal = $('#tune');
+  if (modal.hidden || e.key !== 'Tab') return;
+  const f = [...modal.querySelectorAll('button, [href], input, select, [tabindex]:not([tabindex="-1"])')].filter((el) => !el.disabled && el.offsetParent !== null);
+  if (!f.length) return;
+  const first = f[0], last = f[f.length - 1];
+  if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+  else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
 }
 
 function reflectPngState() {
@@ -339,7 +352,7 @@ async function runProbe() {
 function wireModal() {
   const modal = $('#tune');
   modal.addEventListener('click', (e) => { if (e.target.dataset.close !== undefined) closeTune(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.hidden) closeTune(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.hidden) closeTune(); trapFocus(e); });
   const slider = $('#tuneQ');
   slider.addEventListener('input', (e) => { tuneCtx.quality = Number(e.target.value); $('#tuneQVal').textContent = e.target.value; scheduleProbe(); });
   $('#tuneApply').addEventListener('click', () => { if (tuneCtx?.last) tuneCtx.onApply(tuneCtx.last); closeTune(); });
@@ -348,6 +361,7 @@ function wireModal() {
 function closeTune() {
   $('#tune').hidden = true;
   document.body.style.overflow = '';
+  tuneCtx?.opener?.focus?.(); // restore focus to the Tune button
   tuneCtx = null;
 }
 

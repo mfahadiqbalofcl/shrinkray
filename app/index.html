@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <title>ShrinkRay — compress images in your browser</title>
+    <title>ShrinkRay · compress images in your browser</title>
     <meta name="description" content="Compress images to AVIF, WebP, JPEG or PNG right in your browser. Nothing is uploaded. Free, unlimited, private." />
     <meta name="theme-color" content="#f6f4ee" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -25,7 +25,7 @@
 
       <section class="hero">
         <h1>Compress images <em>without</em> the quality tax.</h1>
-        <p>Drop in photos and get back <b>the smallest file that still looks right</b> — measured perceptually, not guessed. AVIF, WebP, JPEG, PNG. It all runs on your device, so nothing is ever uploaded.</p>
+        <p>Drop in photos and get back <b>the smallest file that still looks right</b>, measured perceptually, not guessed. AVIF, WebP, JPEG, PNG. It all runs on your device, so nothing is ever uploaded.</p>
       </section>
 
       <div class="layout">
@@ -33,9 +33,9 @@
         <aside class="panel controls" aria-label="Compression settings">
           <div class="control-group">
             <span class="label">Goal</span>
-            <div class="seg" id="mode" role="tablist">
-              <button type="button" data-mode="quality" class="on" role="tab">Keep quality</button>
-              <button type="button" data-mode="size" role="tab">Target a size</button>
+            <div class="seg" id="mode" role="group" aria-label="Compression goal">
+              <button type="button" data-mode="quality" class="on" aria-pressed="true">Keep quality</button>
+              <button type="button" data-mode="size" aria-pressed="false">Target a size</button>
             </div>
           </div>
 
@@ -47,7 +47,7 @@
           <div class="control-group" data-for="size" hidden>
             <span class="label">Target size</span>
             <div class="field row">
-              <input type="number" id="targetKB" value="200" min="1" step="10" />
+              <input type="number" id="targetKB" value="200" min="1" step="10" aria-label="Target size in KB" />
               <span class="suffix">KB</span>
             </div>
             <p class="hint">Fills the budget at the best quality it can, and downscales only if it truly must.</p>
@@ -56,7 +56,7 @@
           <div class="control-group">
             <span class="label">Format</span>
             <select id="format" aria-label="Output format">
-              <option value="auto" selected>Auto — pick the smallest</option>
+              <option value="auto" selected>Auto (pick the smallest)</option>
               <option value="avif">AVIF (smallest)</option>
               <option value="webp">WebP (fast, universal)</option>
               <option value="jpeg">JPEG (max compatibility)</option>
@@ -80,7 +80,7 @@
             <div class="control-group" style="margin-top:14px">
               <div class="field row">
                 <span class="label" style="flex:1">Effort</span>
-                <input type="range" id="effort" min="0" max="9" value="4" style="flex:2" />
+                <input type="range" id="effort" min="0" max="9" value="4" style="flex:2" aria-label="Encoder effort" />
                 <span class="suffix" id="effortVal">auto</span>
               </div>
               <p class="hint">Higher effort = smaller files, slower encode. Leave on auto for a fast, small result.</p>
@@ -102,7 +102,7 @@
 
           <div class="summary" id="summary">
             <div class="summary-stat">
-              <span class="summary-big" id="summaryBig">—</span>
+              <span class="summary-big" id="summaryBig"></span>
               <span class="summary-sub" id="summarySub"></span>
             </div>
             <label class="summary-rename" id="renameWrap" hidden>
@@ -120,7 +120,7 @@
       </div>
 
       <footer class="site-foot">
-        <span>ShrinkRay — perceptual image compression, in your browser. MIT · open source.</span>
+        <span>ShrinkRay · perceptual image compression, in your browser. MIT · open source.</span>
         <span><a href="https://github.com/mfahadiqbalofcl/shrinkray" target="_blank" rel="noopener">GitHub</a></span>
       </footer>
     </div>
@@ -179,9 +179,9 @@
             <input type="range" id="tuneQ" min="1" max="100" value="75" aria-label="Quality" />
           </div>
           <div class="tune-stats">
-            <div class="stat"><div class="n" id="tuneSize">—</div><div class="l">size</div></div>
-            <div class="stat"><div class="n accent" id="tuneSaved">—</div><div class="l">smaller</div></div>
-            <div class="stat"><div class="n" id="tuneScore">—</div><div class="l">visual match</div></div>
+            <div class="stat"><div class="n" id="tuneSize"></div><div class="l">size</div></div>
+            <div class="stat"><div class="n accent" id="tuneSaved"></div><div class="l">smaller</div></div>
+            <div class="stat"><div class="n" id="tuneScore"></div><div class="l">visual match</div></div>
           </div>
         </div>
         <div class="modal-foot">
