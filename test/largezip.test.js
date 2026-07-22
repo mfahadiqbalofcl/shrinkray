@@ -61,3 +61,63 @@ test('processZipFile: streams a ZIP file, preserves folders, reports stages', as
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('processZipFile: survives absolute-path / root "/" entries (real-world ZIPs)', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'shrinkray-test-'));
+  try {
+    // These names mirror what Finder/Windows/exporters really produce and what
+    // made a 347MB client ZIP hang on "reading": a bare "/" root entry, an
+    // absolute path, and a traversal. yauzl would abort the whole archive on any
+    // of them; the fix decodes + sanitizes names so the read just carries on.
+    const tree = {
+      '/': new Uint8Array(0),                                  // bare root dir entry
+      '/House/photo1.jpg': new Uint8Array(await photo(700, 500, 1)), // absolute path
+      'Kitchen/photo2.jpg': new Uint8Array(await photo(600, 600, 2)),
+      '../escape.jpg': new Uint8Array(await photo(500, 400, 3)),      // zip-slip attempt
+      'notes.txt': new Uint8Array(Buffer.from('skip me')),
+    };
+    const inPath = join(dir, 'in.zip');
+    const outPath = join(dir, 'out.zip');
+    await writeFile(inPath, Buffer.from(zipSync(tree)));
+
+    const { stats } = await processZipFile(inPath, outPath, { mode: 'quality', target: 'balanced', format: 'webp' }, () => {});
+    assert.equal(stats.images, 3, 'all three images found despite the odd names');
+    assert.equal(stats.compressed, 3);
+
+    const back = unzipSync(new Uint8Array(await readFile(outPath)));
+    const names = Object.keys(back);
+    // Every output name is a safe relative path — no leading slash, no traversal.
+    for (const n of names) {
+      assert.ok(!n.startsWith('/'), `no absolute path in output: ${n}`);
+      assert.ok(!n.split('/').includes('..'), `no traversal in output: ${n}`);
+    }
+    assert.ok('House/photo1.webp' in back, 'absolute path was relativised');
+    assert.ok('Kitchen/photo2.webp' in back);
+    assert.ok('escape.webp' in back, 'traversal stripped to a safe name');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('processZipFile: directory entries are not miscounted as skipped', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'shrinkray-test-'));
+  try {
+    // Explicit directory entries (keys ending in "/") plus one real non-image.
+    // Only the non-image should count as skipped — not the folders.
+    const tree = {
+      'album/': new Uint8Array(0),
+      'album/sub/': new Uint8Array(0),
+      'album/a.jpg': new Uint8Array(await photo(500, 400, 1)),
+      'album/notes.txt': new Uint8Array(Buffer.from('skip me')),
+    };
+    const inPath = join(dir, 'in.zip');
+    const outPath = join(dir, 'out.zip');
+    await writeFile(inPath, Buffer.from(zipSync(tree)));
+
+    const { stats } = await processZipFile(inPath, outPath, { mode: 'quality', target: 'high', format: 'webp' }, () => {});
+    assert.equal(stats.images, 1);
+    assert.equal(stats.skipped, 1, 'only notes.txt is skipped; the two folders are not');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

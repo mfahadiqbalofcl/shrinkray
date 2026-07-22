@@ -25,7 +25,7 @@ import { randomUUID } from 'node:crypto';
 import { availableFormats, QUALITY_TARGETS } from './pipeline.js';
 import { parseMultipart } from './multipart.js';
 import { compressMany } from './batch.js';
-import { readZip, writeZip, rewriteExtension } from './zip.js';
+import { readZip, writeZip, rewriteExtension, uniqueName } from './zip.js';
 import { processZipFile } from './largezip.js';
 import { createUpload, writeChunk, uploadStatus, finalizeUpload } from './uploads.js';
 
@@ -195,7 +195,7 @@ async function runLoose(files, opts, send) {
       ok++;
       // For "download all", keep the original if compression grew it.
       if (r.best.grewLargerThanSource) {
-        zipEntries.push({ path: r.path, data: items[i].data });
+        zipEntries.push({ path: uniqueName(r.path, taken), data: items[i].data });
         totalOut += r.originalSize;
       } else {
         const outName = rewriteExtension(r.path, r.best.ext, taken);
@@ -243,9 +243,10 @@ async function runZip(file, opts, send) {
     }
     ok++;
     if (r.best.grewLargerThanSource) {
-      entries.push({ path: r.path, data: images[i].data });
+      const outPath = uniqueName(r.path, taken);
+      entries.push({ path: outPath, data: images[i].data });
       totalOut += r.originalSize;
-      files.push({ path: r.path, outPath: r.path, ok: true, keptOriginal: true, format: 'original', originalSize: r.originalSize, size: r.originalSize, percentSaved: 0 });
+      files.push({ path: r.path, outPath, ok: true, keptOriginal: true, format: 'original', originalSize: r.originalSize, size: r.originalSize, percentSaved: 0 });
     } else {
       const outPath = rewriteExtension(r.path, r.best.ext, taken);
       entries.push({ path: outPath, data: r.best.bytes });
@@ -260,7 +261,7 @@ async function runZip(file, opts, send) {
     'manifest.json': JSON.stringify(manifest, null, 2),
     'REPORT.txt': zipReport(manifest, skipped),
   });
-  const downloadId = stashDownload(buffer, 'shrinkray-compressed.zip');
+  const downloadId = stashDownload({ buffer, filename: 'shrinkray-compressed.zip' });
   send({ type: 'done', stats, downloadId, files });
 }
 
@@ -368,7 +369,7 @@ async function processZipAndStream(res, inPath, dir, opts) {
     const uploadedSize = (await stat(inPath)).size;
     send({ type: 'uploaded', size: uploadedSize });
     const { stats, outSize } = await processZipFile(inPath, outPath, opts, (ev) => {
-      if (ev.stage === 'reading') send({ type: 'stage', stage: 'reading' });
+      if (ev.stage === 'reading') { current = ''; send({ type: 'stage', stage: 'reading', scanned: ev.scanned, total: ev.total }); }
       else if (ev.stage === 'start') send({ type: 'start', total: ev.total, skipped: ev.skipped, isZip: true });
       else if (ev.stage === 'compressing') { current = ev.name; send({ type: 'progress', done: ev.done, total: ev.total, totalIn: ev.totalIn, totalOut: ev.totalOut, name: ev.name }); }
       else if (ev.stage === 'packaging') send({ type: 'stage', stage: 'packaging' });

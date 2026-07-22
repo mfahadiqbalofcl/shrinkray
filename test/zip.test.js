@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import sharp from 'sharp';
 import { zipSync, unzipSync } from 'fflate';
 
-import { isCompressibleImage, readZip, writeZip, rewriteExtension } from '../src/zip.js';
+import { isCompressibleImage, readZip, writeZip, rewriteExtension, uniqueName, sanitizeZipPath } from '../src/zip.js';
 import { compressZip } from '../src/batch.js';
 import { getPool } from '../src/pool.js';
 
@@ -33,6 +33,25 @@ test('isCompressibleImage: keeps images, drops junk/dirs/dotfiles', () => {
   assert.equal(isCompressibleImage('folder/'), false);
   assert.equal(isCompressibleImage('__MACOSX/._photo.jpg'), false);
   assert.equal(isCompressibleImage('.hidden/pic.jpg'), false);
+});
+
+test('sanitizeZipPath: strips absolute/traversal/Windows junk to a safe relative path', () => {
+  assert.equal(sanitizeZipPath('ok/good.jpg'), 'ok/good.jpg');
+  assert.equal(sanitizeZipPath('/'), '');                       // the bare root entry that broke real ZIPs
+  assert.equal(sanitizeZipPath('/Users/me/pic.jpg'), 'Users/me/pic.jpg');
+  assert.equal(sanitizeZipPath('C:\\photos\\win.jpg'), 'photos/win.jpg'); // drive + backslashes
+  assert.equal(sanitizeZipPath('../../etc/evil.jpg'), 'etc/evil.jpg');    // zip-slip neutralised
+  assert.equal(sanitizeZipPath('a/./b/../c.jpg'), 'a/c.jpg');
+  assert.equal(sanitizeZipPath(''), '');
+});
+
+test('uniqueName: reserves a name keeping its extension, dedupes against taken', () => {
+  const taken = new Set();
+  assert.equal(uniqueName('a/logo.avif', taken), 'a/logo.avif');
+  assert.equal(uniqueName('a/logo.avif', taken), 'a/logo-2.avif'); // second collides
+  assert.equal(uniqueName('a/logo.avif', taken), 'a/logo-3.avif');
+  // Shares the set with rewriteExtension: a recompressed file can't reuse the name.
+  assert.equal(rewriteExtension('a/logo.png', 'avif', taken), 'a/logo-4.avif');
 });
 
 test('rewriteExtension: keeps folder, swaps ext, avoids collisions', () => {

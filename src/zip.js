@@ -18,9 +18,37 @@ import { basename, extname } from 'node:path';
 
 const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.webp', '.avif', '.gif', '.tiff', '.tif', '.heic', '.heif', '.bmp']);
 
-/** Is this zip entry an image we should try to compress? */
+/**
+ * Turn a raw ZIP entry name into a safe, relative POSIX path.
+ *
+ * Real-world archives contain names that a naive reader chokes on: a root "/"
+ * entry, absolute paths ("/Users/…"), Windows drive letters and backslashes,
+ * and "../" traversal (zip-slip). Left alone these either abort the read
+ * (yauzl rejects absolute paths outright) or let a malicious ZIP write outside
+ * its folder. We normalise every name through here so the rest of the pipeline
+ * only ever sees clean, relative paths.
+ *
+ * @param {string} name
+ * @returns {string} a relative path, or '' if nothing safe remains
+ */
+export function sanitizeZipPath(name) {
+  let p = String(name).replace(/\\/g, '/'); // Windows separators -> POSIX
+  p = p.replace(/^[a-zA-Z]:/, '');           // strip a drive letter (C:)
+  // Resolve the path segment by segment. '.' is dropped, '..' pops the previous
+  // segment but can never pop past the root, so the result always stays inside
+  // the archive — leading slashes and traversal both disappear.
+  const out = [];
+  for (const seg of p.split('/')) {
+    if (!seg || seg === '.') continue;
+    if (seg === '..') { out.pop(); continue; }
+    out.push(seg);
+  }
+  return out.join('/');
+}
+
+/** Is this zip entry an image we should try to compress? Expects a sanitized path. */
 export function isCompressibleImage(path) {
-  if (path.endsWith('/')) return false; // directory entry
+  if (!path || path.endsWith('/')) return false; // empty or directory entry
   if (path.startsWith('__MACOSX/')) return false; // macOS resource-fork junk
   // Reject anything under, or being, a dotfile/dot-directory (.git, .DS_Store,
   // ._resourceforks, .hidden/…). Any path segment starting with '.' is out.
@@ -40,10 +68,11 @@ export function readZip(buffer) {
       if (err) return reject(new Error(`Could not read ZIP: ${err.message}`));
       const images = [];
       const skipped = [];
-      for (const [path, data] of Object.entries(files)) {
-        if (data.length === 0 && path.endsWith('/')) continue; // pure directory
+      for (const [rawPath, data] of Object.entries(files)) {
+        if (data.length === 0 && rawPath.endsWith('/')) continue; // pure directory
+        const path = sanitizeZipPath(rawPath);
         if (isCompressibleImage(path)) images.push({ path, data: Buffer.from(data) });
-        else if (!path.endsWith('/') && !path.startsWith('__MACOSX/')) skipped.push(path);
+        else if (path && !rawPath.endsWith('/') && !path.startsWith('__MACOSX/')) skipped.push(path);
       }
       resolve({ images, skipped });
     });
@@ -87,5 +116,23 @@ export function rewriteExtension(path, ext, taken) {
     while (taken.has(candidate)) candidate = `${dir}${stem}-${n++}.${ext}`;
     taken.add(candidate);
   }
+  return candidate;
+}
+
+/**
+ * Reserve a unique output path, KEEPING the original extension. Used for entries
+ * we ship unchanged (an already-optimised image that recompression only grew).
+ * Shares the same `taken` set as rewriteExtension, so a kept original and a
+ * recompressed file can never land on the same name (`a/p.avif` + `a/p-2.avif`).
+ */
+export function uniqueName(path, taken) {
+  if (!taken) return path;
+  const dir = path.slice(0, path.length - basename(path).length);
+  const ext = extname(path);
+  const stem = basename(path, ext);
+  let candidate = path;
+  let n = 2;
+  while (taken.has(candidate)) candidate = `${dir}${stem}-${n++}${ext}`;
+  taken.add(candidate);
   return candidate;
 }

@@ -27,13 +27,20 @@ export function defaultPoolSize() {
   return Math.max(2, Math.min(cores - 2, 8));
 }
 
+// A single job should never take this long. It's a backstop against a worker
+// that wedges (a pathological encode/metric) or exits silently — without it, that
+// job's promise never settles and the whole batch hangs forever behind a
+// still-ticking progress heartbeat. Generous, so a genuinely huge image never
+// trips it; override with SHRINKRAY_JOB_TIMEOUT_MS.
+const JOB_TIMEOUT_MS = Number(process.env.SHRINKRAY_JOB_TIMEOUT_MS) || 10 * 60 * 1000;
+
 export class Pool {
   constructor(size = defaultPoolSize()) {
     this.size = size;
     this._workers = [];
     this._idle = [];
     this._queue = [];
-    this._jobs = new Map(); // id -> { resolve, reject, worker }
+    this._jobs = new Map(); // id -> { resolve, reject, worker, timer }
     this._nextId = 1;
     this._destroyed = false;
     for (let i = 0; i < size; i++) this._spawn();
@@ -42,7 +49,10 @@ export class Pool {
   _spawn() {
     const worker = new Worker(WORKER_PATH);
     worker.on('message', (msg) => this._onMessage(worker, msg));
-    worker.on('error', (err) => this._onWorkerError(worker, err));
+    worker.on('error', (err) => this._replaceWorker(worker, err));
+    // A worker can also die WITHOUT an 'error' (a clean but unexpected exit, OOM
+    // kill). Catch that too, or its in-flight job would never settle.
+    worker.on('exit', () => { if (!this._destroyed) this._replaceWorker(worker, new Error('Worker exited unexpectedly')); });
     this._workers.push(worker);
     this._idle.push(worker);
   }
@@ -50,6 +60,7 @@ export class Pool {
   _onMessage(worker, msg) {
     const job = this._jobs.get(msg.id);
     if (job) {
+      clearTimeout(job.timer);
       this._jobs.delete(msg.id);
       if (msg.ok) job.resolve(msg);
       else job.reject(new Error(msg.error));
@@ -58,11 +69,14 @@ export class Pool {
     this._pump();
   }
 
-  // A worker that crashes hard (native fault, OOM) rejects its in-flight job and
-  // is replaced, so one bad image can't wedge the whole pool.
-  _onWorkerError(worker, err) {
+  // A worker that crashes hard (native fault, OOM), errors, or times out rejects
+  // its in-flight job and is replaced, so one bad image can't wedge the pool.
+  // Idempotent: 'error' and 'exit' can both fire for the same death.
+  _replaceWorker(worker, err) {
+    if (!this._workers.includes(worker)) return;
     for (const [id, job] of this._jobs) {
       if (job.worker === worker) {
+        clearTimeout(job.timer);
         this._jobs.delete(id);
         job.reject(err);
       }
@@ -74,12 +88,22 @@ export class Pool {
     this._pump();
   }
 
+  _onJobTimeout(id) {
+    const job = this._jobs.get(id);
+    if (!job) return;
+    this._jobs.delete(id);
+    job.reject(new Error('Compression timed out — this image took too long or the worker became unresponsive'));
+    this._replaceWorker(job.worker, new Error('Worker timed out')); // wedged worker: replace its slot
+  }
+
   _pump() {
     while (this._idle.length && this._queue.length) {
       const worker = this._idle.shift();
       const task = this._queue.shift();
       const id = this._nextId++;
-      this._jobs.set(id, { resolve: task.resolve, reject: task.reject, worker });
+      const timer = setTimeout(() => this._onJobTimeout(id), JOB_TIMEOUT_MS);
+      timer.unref?.(); // don't keep the process alive just for the backstop
+      this._jobs.set(id, { resolve: task.resolve, reject: task.reject, worker, timer });
       // Copy the input into a standalone Uint8Array so transferring it can never
       // detach memory shared by Node's Buffer pool.
       const bytes = Uint8Array.prototype.slice.call(task.input);
@@ -123,6 +147,7 @@ export class Pool {
 
   async destroy() {
     this._destroyed = true;
+    for (const job of this._jobs.values()) clearTimeout(job.timer);
     await Promise.all(this._workers.map((w) => w.terminate()));
     this._workers = [];
     this._idle = [];

@@ -359,8 +359,14 @@ function handleBatchEvent(ev, st) {
       setStep('upload', 'done', fmtSize(ev.size));
       break;
     case 'stage':
-      if (ev.stage === 'reading') { setStep('read', 'active'); indeterminate(true); }
-      else if (ev.stage === 'packaging') { setStep('compress', 'done'); setStep('package', 'active'); indeterminate(true); $('#batchEta').textContent = ''; }
+      if (ev.stage === 'reading') {
+        setStep('read', 'active');
+        indeterminate(true);
+        // Show the archive being scanned so a big ZIP reads as "working", not stuck.
+        const scanned = ev.scanned || 0;
+        setStepNote('read', scanned ? `${scanned} entries…` : 'opening…');
+        $('#batchFoot').textContent = scanned ? `Reading archive — ${scanned} entries scanned…` : 'Reading archive…';
+      } else if (ev.stage === 'packaging') { setStep('compress', 'done'); setStep('package', 'active'); indeterminate(true); $('#batchEta').textContent = ''; $('#batchFoot').textContent = 'Packaging your ZIP…'; }
       break;
     case 'start':
       st.total = ev.total; st.startCompress = performance.now();

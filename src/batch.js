@@ -8,7 +8,7 @@
  */
 
 import { getPool } from './pool.js';
-import { readZip, writeZip, rewriteExtension } from './zip.js';
+import { readZip, writeZip, rewriteExtension, uniqueName } from './zip.js';
 
 /**
  * Compress a list of in-memory images in parallel across the worker pool.
@@ -77,11 +77,14 @@ export async function compressZip(zipBuffer, options, onProgress) {
     // Never ship a file bigger than it came in. If the best encode grew (an
     // already-optimised source), keep the ORIGINAL bytes at their original path.
     if (r.best.grewLargerThanSource) {
-      outEntries.push({ path: r.path, data: images[i].data });
+      // Reserve the name so a kept original can't collide with another kept
+      // original or a recompressed file that maps to the same path.
+      const outPath = uniqueName(r.path, taken);
+      outEntries.push({ path: outPath, data: images[i].data });
       totalOut += r.originalSize;
       manifestFiles.push({
         path: r.path,
-        outPath: r.path,
+        outPath,
         ok: true,
         keptOriginal: true,
         format: 'original',
